@@ -70,6 +70,7 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.Badnng.moe.ui.component.Md3eNavigationRailExpandButton
+import com.Badnng.moe.ui.screen.settings.SettingsPage
 import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -78,6 +79,7 @@ import com.Badnng.moe.activity.MainActivity
 import com.Badnng.moe.data.db.OrderEntity
 import com.Badnng.moe.data.db.OrderGroup
 import com.Badnng.moe.helper.BrandIconResolver
+import com.Badnng.moe.helper.GroupScreenshotPaths
 import com.Badnng.moe.helper.NotificationHelper
 import com.Badnng.moe.helper.NotificationScheduler
 import com.Badnng.moe.helper.ScreenshotStorage
@@ -789,6 +791,9 @@ fun CaptureScreenContent(
                                     orderType = firstOrder.orderType,
                                     brandName = firstOrder.brandName,
                                     screenshotPath = firstOrder.screenshotPath,
+                                    screenshotPathsJson = GroupScreenshotPaths.encode(
+                                        ordersToMerge.map(OrderEntity::screenshotPath),
+                                    ),
                                     sourceApp = firstOrder.sourceApp,
                                     sourcePackage = firstOrder.sourcePackage,
                                     recognizedText = firstOrder.recognizedText,
@@ -802,6 +807,17 @@ fun CaptureScreenContent(
                                 groupDao.updateOrderCount(groupId, ordersToMerge.size)
                             } else if (mode == "existing" && targetGroupId != null) {
                                 // 添加到已有组
+                                groupDao.getGroupById(targetGroupId)?.let { targetGroup ->
+                                    groupDao.updateGroup(targetGroup.copy(
+                                        screenshotPath = targetGroup.screenshotPath.ifBlank {
+                                            ordersToMerge.first().screenshotPath
+                                        },
+                                        screenshotPathsJson = GroupScreenshotPaths.encode(
+                                            GroupScreenshotPaths.all(targetGroup) +
+                                                ordersToMerge.map(OrderEntity::screenshotPath),
+                                        ),
+                                    ))
+                                }
                                 for (order in ordersToMerge) {
                                     orderDao.update(order.copy(groupId = targetGroupId))
                                 }
@@ -1440,6 +1456,9 @@ fun OrderGroupCard(
                                                 sourceApp = group.sourceApp
                                             )
                                             NotificationHelper(context).showGroupNotification(notificationGroup, groupOrders)
+                                            com.Badnng.moe.wearable.WearableSyncManager
+                                                .getInstance(context)
+                                                .resendGroupToWatch(notificationGroup, groupOrders)
                                         },
                                         modifier = Modifier.weight(1f),
                                         shape = RoundedCornerShape(16.dp),
@@ -1768,7 +1787,12 @@ fun OrderCard(
                                 horizontalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
                                 FilledTonalButton(
-                                    onClick = { NotificationHelper(context).showPromotedLiveUpdate(order) },
+                                    onClick = {
+                                            NotificationHelper(context).showPromotedLiveUpdate(order)
+                                            com.Badnng.moe.wearable.WearableSyncManager
+                                                .getInstance(context)
+                                                .resendOrderToWatch(order)
+                                        },
                                     modifier = Modifier.weight(1f),
                                     shape = RoundedCornerShape(16.dp),
                                     colors = ButtonDefaults.filledTonalButtonColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)

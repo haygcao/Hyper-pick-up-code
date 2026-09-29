@@ -35,15 +35,33 @@ class ScheduledNotificationReceiver : BroadcastReceiver() {
                     if (groupId > 0) {
                         val group = db.orderGroupDao().getGroupById(groupId)
                         if (group != null) {
-                            val orders = db.orderDao().getAllOrdersList().filter { it.groupId == groupId }
-                            NotificationHelper(context).showGroupNotification(group, orders)
+                            val orders = db.orderDao().getAllOrdersList().filter {
+                                it.groupId == groupId && !it.isCompleted
+                            }
+                            if (orders.isNotEmpty() && !group.isCompleted) {
+                                val groupForNotify = group.copy(orderCount = orders.size)
+                                NotificationHelper(context).showGroupNotification(
+                                    groupForNotify,
+                                    orders,
+                                )
+                                com.Badnng.moe.wearable.WearableSyncManager
+                                    .getInstance(context)
+                                    .resendGroupToWatch(groupForNotify, orders)
+                            } else {
+                                NotificationHelper(context).cancelGroupNotification(groupId)
+                            }
                         }
                     }
                 } else {
                     val orderId = intent.getStringExtra("order_id") ?: return@launch
                     val order = db.orderDao().getOrderById(orderId)
-                    if (order != null) {
+                    if (order != null && !order.isCompleted) {
                         NotificationHelper(context).showPromotedLiveUpdate(order)
+                        com.Badnng.moe.wearable.WearableSyncManager
+                            .getInstance(context)
+                            .resendOrderToWatch(order)
+                    } else {
+                        NotificationHelper(context).cancelNotification(orderId)
                     }
                 }
             } catch (_: Exception) {

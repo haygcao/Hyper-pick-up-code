@@ -16,6 +16,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
+import java.util.UUID
 import java.util.concurrent.TimeUnit
 
 class OnlineRecognitionClient(context: Context) {
@@ -24,6 +25,12 @@ class OnlineRecognitionClient(context: Context) {
     private val isDebuggable =
         appContext.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0
     private val systemPrompt by lazy { OnlineRecognitionPreferences.effectivePrompt(appContext) }
+
+    private enum class ApiKind {
+        RESPONSES,
+        CHAT,
+        ANTHROPIC,
+    }
 
     suspend fun recognizeImage(
         bitmap: Bitmap,
@@ -119,16 +126,18 @@ class OnlineRecognitionClient(context: Context) {
                 throw OnlineRecognitionException("尚未获取或选择自定义供应商模型")
             }
 
-            val isResponsesApi = provider == OnlineRecognitionProvider.OPENAI ||
-                provider == OnlineRecognitionProvider.MINIMAX ||
-                (provider == OnlineRecognitionProvider.CUSTOM &&
-                    OnlineRecognitionPreferences.customRequestMode(appContext) ==
-                    CustomRequestMode.RESPONSES)
-            val requestUrl = endpoint(provider, mimoBillingMode, isResponsesApi)
-            val body = if (isResponsesApi) {
-                createResponsesBody(model, imageDataUrl, sourceText, imageHint, provider)
-            } else {
-                createChatCompletionsBody(model, imageDataUrl, sourceText, imageHint)
+            val kind = apiKind(provider, model)
+            val requestUrl = endpoint(provider, mimoBillingMode, kind)
+            val body = when (kind) {
+                ApiKind.RESPONSES -> {
+                    createResponsesBody(model, imageDataUrl, sourceText, imageHint, provider)
+                }
+                ApiKind.ANTHROPIC -> {
+                    createAnthropicMessagesBody(model, imageDataUrl, sourceText, imageHint)
+                }
+                ApiKind.CHAT -> {
+                    createChatCompletionsBody(model, imageDataUrl, sourceText, imageHint)
+                }
             }
             logFullPayload("request url", requestUrl)
             logFullPayload("request body", body.toString())
@@ -137,7 +146,20 @@ class OnlineRecognitionClient(context: Context) {
                 .post(body.toString().toRequestBody(JSON_MEDIA_TYPE))
                 .header("Content-Type", "application/json")
                 .apply {
-                    if (provider == OnlineRecognitionProvider.MIMO) {
+                    // OpenCode 要求客户端用自身专属 UA 标识，并在每段对话携带稳定的
+                    // 会话 ID，否则会被当作通用 SDK 流量，路由与提示词缓存都无法优化。
+                    // 三种端点（chat/completions、responses、messages）共用同一网关，统一下发。
+                    if (provider.isOpenCode()) {
+                        header("User-Agent", openCodeUserAgent())
+                        header("x-opencode-session", openCodeSessionId())
+                    }
+                }
+                .apply {
+                    if (kind == ApiKind.ANTHROPIC) {
+                        header("x-api-key", apiKey)
+                        header("Authorization", "Bearer $apiKey")
+                        header("anthropic-version", ANTHROPIC_VERSION)
+                    } else if (provider == OnlineRecognitionProvider.MIMO) {
                         header("api-key", apiKey)
                     } else {
                         header("Authorization", "Bearer $apiKey")
@@ -163,10 +185,10 @@ class OnlineRecognitionClient(context: Context) {
                     )
                 }
                 try {
-                    val content = if (isResponsesApi) {
-                        extractResponsesContent(responseText)
-                    } else {
-                        extractChatContent(responseText)
+                    val content = when (kind) {
+                        ApiKind.RESPONSES -> extractResponsesContent(responseText)
+                        ApiKind.ANTHROPIC -> extractAnthropicContent(responseText)
+                        ApiKind.CHAT -> extractChatContent(responseText)
                     }
                     Log.d(TAG, "model content: ${content.logSnippet()}")
                     parseRecognitionContent(content, sourceText).also(::logRecognitionResults)
@@ -244,7 +266,68 @@ class OnlineRecognitionClient(context: Context) {
                     model.id.startsWith("mimo-") -> put("max_completion_tokens", 1200)
                     else -> put("max_tokens", 1200)
                 }
-                if (model.reasoningControl == ReasoningControl.THINKING_DISABLED) {
+                when (model.reasoningControl) {
+                    ReasoningControl.THINKING_DISABLED -> {
+                        put("thinking", JSONObject().put("type", "disabled"))
+                    }
+                    ReasoningControl.OPENCODE_COMBINED -> {
+                        // OpenCode go/zen 网关：同时携带两种关闭思考参数，
+                        // 兼容 OpenAI 风格与 DeepSeek/Qwen 风格的网关实现。
+                        put("reasoning_effort", "none")
+                        put("enable_thinking", false)
+                    }
+                    else -> Unit
+                }
+            }
+    }
+
+    private fun createAnthropicMessagesBody(
+        model: OnlineRecognitionModel,
+        imageDataUrl: String?,
+        sourceText: String?,
+        imageHint: String?,
+    ): JSONObject {
+        val userContent = JSONArray()
+        if (imageDataUrl != null) {
+            val (mediaType, base64Data) = parseImageDataUrl(imageDataUrl)
+            userContent.put(
+                JSONObject()
+                    .put("type", "image")
+                    .put(
+                        "source",
+                        JSONObject()
+                            .put("type", "base64")
+                            .put("media_type", mediaType)
+                            .put("data", base64Data),
+                    )
+            )
+            userContent.put(
+                JSONObject()
+                    .put("type", "text")
+                    .put("text", imageRequestPrompt(imageHint))
+            )
+        } else {
+            userContent.put(
+                JSONObject()
+                    .put("type", "text")
+                    .put("text", TEXT_REQUEST_PROMPT + sourceText.orEmpty())
+            )
+        }
+        return JSONObject()
+            .put("model", model.id)
+            .put("max_tokens", 1200)
+            .put("system", systemPrompt)
+            .put(
+                "messages",
+                JSONArray().put(
+                    JSONObject()
+                        .put("role", "user")
+                        .put("content", userContent)
+                )
+            )
+            .put("stream", false)
+            .apply {
+                if (model.reasoningControl == ReasoningControl.ANTHROPIC_DISABLED) {
                     put("thinking", JSONObject().put("type", "disabled"))
                 }
             }
@@ -307,10 +390,34 @@ class OnlineRecognitionClient(context: Context) {
             }
     }
 
+    private fun apiKind(
+        provider: OnlineRecognitionProvider,
+        model: OnlineRecognitionModel,
+    ): ApiKind = when (provider) {
+        OnlineRecognitionProvider.OPENAI,
+        OnlineRecognitionProvider.MINIMAX,
+        -> ApiKind.RESPONSES
+        OnlineRecognitionProvider.CUSTOM -> {
+            if (OnlineRecognitionPreferences.customRequestMode(appContext) ==
+                CustomRequestMode.RESPONSES
+            ) {
+                ApiKind.RESPONSES
+            } else {
+                ApiKind.CHAT
+            }
+        }
+        OnlineRecognitionProvider.OPENCODE_GO -> when (model.id) {
+            "gpt-5.6-luna" -> ApiKind.RESPONSES
+            "minimax-m3", "qwen3.8-max", "qwen3.7-plus", "qwen3.6-plus" -> ApiKind.ANTHROPIC
+            else -> ApiKind.CHAT
+        }
+        else -> ApiKind.CHAT
+    }
+
     private fun endpoint(
         provider: OnlineRecognitionProvider,
         mimoBillingMode: MimoBillingMode,
-        responsesApi: Boolean,
+        apiKind: ApiKind,
     ): String = when (provider) {
         OnlineRecognitionProvider.MIMO -> when (mimoBillingMode) {
             MimoBillingMode.PAY_AS_YOU_GO -> "https://api.xiaomimimo.com/v1/chat/completions"
@@ -319,11 +426,18 @@ class OnlineRecognitionClient(context: Context) {
         OnlineRecognitionProvider.ZHIPU -> "https://open.bigmodel.cn/api/paas/v4/chat/completions"
         OnlineRecognitionProvider.OPENAI -> "https://api.openai.com/v1/responses"
         OnlineRecognitionProvider.MOONSHOT -> "https://api.moonshot.cn/v1/chat/completions"
-        OnlineRecognitionProvider.MINIMAX -> if (responsesApi) {
+        OnlineRecognitionProvider.MINIMAX -> if (apiKind == ApiKind.RESPONSES) {
             "https://api.minimaxi.com/v1/responses"
         } else {
             "https://api.minimaxi.com/v1/chat/completions"
         }
+        OnlineRecognitionProvider.OPENCODE_GO -> when (apiKind) {
+            ApiKind.RESPONSES -> "https://opencode.ai/zen/go/v1/responses"
+            ApiKind.ANTHROPIC -> "https://opencode.ai/zen/go/v1/messages"
+            ApiKind.CHAT -> "https://opencode.ai/zen/go/v1/chat/completions"
+        }
+        OnlineRecognitionProvider.OPENCODE_ZEN -> "https://opencode.ai/zen/v1/chat/completions"
+        OnlineRecognitionProvider.DEEPSEEK -> "https://api.deepseek.com/chat/completions"
         OnlineRecognitionProvider.CUSTOM -> {
             val baseUrl = normalizeCustomBaseUrl(
                 OnlineRecognitionPreferences.customBaseUrl(appContext)
@@ -331,6 +445,34 @@ class OnlineRecognitionClient(context: Context) {
             val mode = OnlineRecognitionPreferences.customRequestMode(appContext)
             "$baseUrl/${mode.endpoint}"
         }
+    }
+
+    /**
+     * OpenCode（Go 与 Zen 共用 opencode.ai 网关）要求客户端用自身专属 UA 标识，
+     * 并在每段对话中携带稳定的会话 ID，用于路由优化与提示词缓存。
+     */
+    private fun OnlineRecognitionProvider.isOpenCode(): Boolean =
+        this == OnlineRecognitionProvider.OPENCODE_GO ||
+            this == OnlineRecognitionProvider.OPENCODE_ZEN
+
+    private fun openCodeUserAgent(): String = OPENCODE_USER_AGENT
+
+    /**
+     * 会话 ID 首次生成后持久化，保证同一安装的所有请求都携带同一个稳定值。
+     * 读取命中内存缓存后无磁盘 IO；仅首次在 IO 线程写一次。
+     */
+    private fun openCodeSessionId(): String {
+        val preferences = appContext.getSharedPreferences(
+            OPENCODE_SESSION_PREFS,
+            Context.MODE_PRIVATE,
+        )
+        preferences.getString(OPENCODE_SESSION_KEY, null)
+            ?.takeIf { it.isNotBlank() }
+            ?.let { return it }
+        val generated = UUID.randomUUID().toString()
+        preferences.edit().putString(OPENCODE_SESSION_KEY, generated).apply()
+        Log.i(TAG, "generated OpenCode session id: $generated")
+        return generated
     }
 
     private fun normalizeCustomBaseUrl(value: String): String {
@@ -358,6 +500,23 @@ class OnlineRecognitionClient(context: Context) {
             ?.optJSONObject("message")
             ?.optString("content")
             ?.takeIf { it.isNotBlank() }
+            ?: throw OnlineRecognitionException("供应商没有返回识别内容")
+    }
+
+    private fun extractAnthropicContent(responseText: String): String {
+        val root = runCatching { JSONObject(responseText) }
+            .getOrElse { throw OnlineRecognitionException("供应商返回了无法解析的数据") }
+        val content = root.optJSONArray("content")
+            ?: throw OnlineRecognitionException("供应商没有返回识别内容")
+        val text = buildString {
+            for (index in 0 until content.length()) {
+                val block = content.optJSONObject(index) ?: continue
+                if (block.optString("type") == "text") {
+                    append(block.optString("text"))
+                }
+            }
+        }
+        return text.takeIf { it.isNotBlank() }
             ?: throw OnlineRecognitionException("供应商没有返回识别内容")
     }
 
@@ -488,6 +647,18 @@ class OnlineRecognitionClient(context: Context) {
         }
     }
 
+    private fun parseImageDataUrl(dataUrl: String): Pair<String, String> {
+        if (dataUrl.startsWith("data:")) {
+            val comma = dataUrl.indexOf(',')
+            if (comma > 4) {
+                val mediaType = dataUrl.substring(5, comma).substringBefore(';')
+                    .ifBlank { "image/jpeg" }
+                return mediaType to dataUrl.substring(comma + 1)
+            }
+        }
+        return "image/jpeg" to dataUrl
+    }
+
     private fun buildBarcodeBrandHint(brand: String): String {
         val safeBrand = brand
             .filterNot { it == '\n' || it == '\r' || it == '\u0000' }
@@ -533,8 +704,15 @@ class OnlineRecognitionClient(context: Context) {
         private const val MAX_LOG_TEXT_LENGTH = 2_000
         private const val MAX_LOG_CHUNK_LENGTH = 3_000
         private const val MAX_LONG_EDGE = 2048
-        private const val JPEG_QUALITY = 85
+        private const val JPEG_QUALITY = 60
         private const val MAX_BARCODE_BRAND_HINT_LENGTH = 40
+        private const val ANTHROPIC_VERSION = "2023-06-01"
+
+        // OpenCode 要求客户端提供自身专属的 user agent（不能用通用 SDK/HTTP 库名），
+        // 并随每段对话发送稳定的 x-opencode-session。
+        private const val OPENCODE_USER_AGENT = "HyperNote/1.0 (Android)"
+        private const val OPENCODE_SESSION_PREFS = "opencode_session"
+        private const val OPENCODE_SESSION_KEY = "session_id"
         private val HTTP_CLIENT = OkHttpClient.Builder()
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(60, TimeUnit.SECONDS)

@@ -1,0 +1,53 @@
+{
+  "package": "com.Badnng.moe",
+  "name": "澎湃记",
+  "versionName": "26.9.13-Watch",
+  "versionCode": 20260913,
+  "minPlatformVersion": 1000,
+  "icon": "/common/logo.png",
+  "deviceTypeList": ["watch"],
+  "features": [
+    {
+      "name": "system.router"
+    },
+    {
+      "name": "system.interconnect"
+    },
+    {
+      "name": "system.storage"
+    },
+    {
+      "name": "system.prompt"
+    },
+    {
+      "name": "system.brightness"
+    },
+    {
+      "name": "system.app"
+    }
+  ],
+  "config": {
+    "logLevel": "log",
+    "designWidth": 480
+  },
+  "router": {
+    "entry": "pages/welcome",
+    "pages": {
+      "pages/welcome": {
+        "component": "welcome"
+      },
+      "pages/index": {
+        "component": "index"
+      },
+      "pages/detail": {
+        "component": "detail"
+      },
+      "pages/group": {
+        "component": "group"
+      },
+      "pages/about": {
+        "component": "about"
+      }
+    }
+  }
+}

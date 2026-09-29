@@ -1,0 +1,818 @@
+<template>
+  <!-- 480 档多取件码二级页（S5 真机 480×480，多屏基档）：主页组卡片点击进入（params.groupId），
+       展示该组全部取件码（主页组卡片只预览前 3 个）；
+       多屏差异由 media query 分档处理（circle480 基档 / S3 circle466 / RW5-6 rect432 / 8·9·10Pro rect336，
+       见 style 文末「屏幕分档」；档内 px 按 designWidth=480 对屏宽等比缩放，档内数值为设计值）；
+       页面动画与返回手势：同 detail/completed 二级页（page-in/page-out + onBackPress 拦截） -->
+  <div class="page{{leaving ? ' page-leaving' : ''}}">
+    <!-- 顶部时钟：置顶忽略安全区（clock-bar y∈[0,48]），HH:mm 每 10 秒刷新 -->
+    <div class="clock-bar">
+      <text class="top-time">{{ clockText }}</text>
+    </div>
+    <!-- 返回键条：返回箭头 + 组标题（品牌名，如「圆通」；无品牌名时用 取件码/取餐码）整体水平居中；
+         （避免 Vela absolute 热区不可靠的问题），rect 档显示、圆表隐藏；
+         右侧 .back-spacer 对称占位，保证标题在本档仍严格居中 -->
+    <div class="back-bar">
+      <text class="back-btn" onclick="onBack">‹</text>
+      <text class="page-title" onclick="onBack" if="{{pageTitle}}">{{ pageTitle }}</text>
+    </div>
+
+    <!-- 手环/方表单行导航（手表排版）：左上角返回按钮+标题、右上角时间；
+         圆表仍用上方两行布局（clock-bar / back-bar） -->
+    <div class="nav-bar">
+      <div class="nav-left">
+        <text class="nav-back" onclick="onBack">‹</text>
+        <text class="nav-title" onclick="onBack">{{ pageTitle }}</text>
+      </div>
+      <text class="nav-time">{{ clockText }}</text>
+    </div>
+    <!-- 计数条：共 N 个取件码（与主页组卡片 meta 语义一致；空状态时不显示） -->
+    <div if="{{items.length > 0}}" class="count-bar">
+      <text class="count-text">{{ countText }}</text>
+    </div>
+
+    <!-- 空状态：组内订单全部完成后显示（快照为唯一数据源，组内无订单即空） -->
+    <div if="{{items.length === 0}}" class="empty">
+      <text class="empty-main">暂无取件码</text>
+      <text class="empty-sub">已完成的取件码可在「已取」页查看</text>
+    </div>
+
+    <!-- 组取件码列表：每条一张卡片（码 + 类型·时间）；
+         无二维码行右侧「完成」按钮（与 .code-main 互为兄弟节点，点击不冒泡进行点击逻辑），
+         有二维码行点击 .code-main 进单码详情页（detail 展示二维码） -->
+    <list if="{{items.length > 0}}" class="code-list">
+      <list-item type="code" for="{{items}}" tid="itemId" class="code-item">
+        <div class="code-card">
+          <div class="code-row">
+            <div class="code-main" onclick="onRowClick($idx)">
+              <text class="code-text">{{ $item.code }}</text>
+              <text class="code-meta">{{ $item.metaText }}</text>
+            </div>
+            <text if="{{!$item.hasQr}}" class="done-btn" onclick="onMarkOne($idx)">完成</text>
+          </div>
+        </div>
+      </list-item>
+    </list>
+
+    <!-- 全部完成：悬浮固定底部中间（同 detail「已完成」按钮风格；点击后本组全部标记完成并返回） -->
+    <div if="{{items.length > 0}}" class="btn-wrap">
+      <div class="all-done-btn" onclick="onMarkAll">
+        <text class="all-done-text">全部完成</text>
+      </div>
+    </div>
+  </div>
+</template>
+
+<style>
+.page {
+  position: relative; /* 作为 .btn-wrap 绝对定位层的包含块（底部悬浮按钮） */
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  background-color: #000000;
+  padding: 0px 36px;
+  /* 进入动画页面渲染即播（page-in 右滑 48px + 淡入 0.25s ease-out）；
+     退出动画（.page-leaving）重播 page-out（反向 0.22s ease-in） */
+  animation-name: page-in;
+  animation-duration: 0.25s;
+  animation-timing-function: ease-out;
+}
+
+/* 退出动画：onBack 置 leaving=true 时叠加本类，切换 animation-name 重播退出动画
+   （与 onBack 中 220ms 延迟返回的定时器时长对应）；静态 opacity: 1 防首帧闪黑 */
+.page-leaving {
+  opacity: 1;
+  animation-name: page-out;
+  animation-duration: 0.22s;
+  animation-timing-function: ease-in;
+}
+
+/* 480 档字号说明（本页为 480x480 基档，= S5 真机档；其余档位见文末分档块）：
+   manifest designWidth=480：px 按屏幕物理宽等比缩放，基档 480×480 屏系数 ×1.000（下述数值均为设计值）；
+   本档各字号即原大屏档值（top-time 26、back-btn 40、page-title 34、count-text 19、
+   empty-main 30、empty-sub 24、code-text 36、code-meta 22、done-btn 26、all-done-text 26），
+   行高容器（line-height/height）保持原大屏兼容关系：
+   .top-time 26px < line-height 48 ✓、箭头 40px 字在 line-height 44 ✓、
+   标题 34px 字在 line-height 44 ✓、.code-text 36px < line-height 44 ✓、
+   .code-meta 22px < line-height 26 ✓、.done-btn 26px < line-height 28 ✓、
+   .all-done-text 26px < line-height 44 ✓ 均不溢出；
+   （其余档位 S3 ×0.971 / RW5-6 ×0.900 / 8·9·10Pro ×0.700 的字号见文末分档块）*/
+
+/* 顶部时钟条：y∈[0,48] 置顶，忽略安全区；时钟文字水平垂直居中 */
+.clock-bar {
+  flex-direction: row;
+  justify-content: center;
+  align-items: center;
+  height: 48px;
+}
+.top-time {
+  line-height: 48px;
+  font-size: 26px;
+  color: #ffffff;
+  font-weight: bold;
+  text-align: center;
+  lines: 1;
+  text-overflow: ellipsis;
+}
+
+/* 返回键条：y∈[48,92]，留在安全区内；返回箭头 + 组标题整体水平居中；
+   与 detail 返回键条同款（等高盒 + align-items: center 垂直对齐） */
+.back-bar {
+  position: relative;
+  flex-direction: row;
+  justify-content: center;
+  align-items: center;
+  height: 44px;
+}
+.back-btn {
+  font-size: 40px;
+  color: #ffffff;
+  line-height: 44px;
+  height: 44px;
+}
+/* 矩形屏单行导航（手表排版：左返回+标题、右时间）：默认隐藏，rect 档显示 */
+.nav-bar {
+  display: none;
+}
+.nav-title {
+  font-size: 36px;
+  color: #ffffff;
+  font-weight: bold;
+  lines: 1;
+  text-overflow: ellipsis;
+}
+.nav-time {
+  font-size: 34px;
+  color: rgba(255, 255, 255, 0.6);
+  lines: 1;
+}
+.page-title {
+  margin-left: 8px;
+  margin-top: 4px;
+  max-width: 200px;
+  font-size: 34px;
+  color: #ffffff;
+  font-weight: bold;
+  line-height: 44px;
+  height: 44px;
+  lines: 1;
+  text-overflow: ellipsis;
+}
+
+/* 计数条：共 N 个取件码（小号灰字，同 completed status-bar 规格） */
+.count-bar {
+  flex-direction: row;
+  justify-content: center;
+  align-items: center;
+  height: 40px;
+}
+.count-text {
+  font-size: 19px;
+  color: #888888;
+  lines: 1;
+}
+
+/* 空状态 */
+.empty {
+  flex: 1;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+}
+.empty-main {
+  font-size: 30px;
+  color: #ffffff;
+  font-weight: bold;
+}
+.empty-sub {
+  font-size: 24px;
+  color: #999999;
+  margin-top: 16px;
+}
+
+/* 滚动容器：Vela 官方 list 列表组件（原生滚动）。
+   垂直滚动必须固定高度：348px = 屏高 480px − 时钟行 48px − 标题行 44px − 计数行 40px；
+   基础 padding-bottom 96px 为底部悬浮「全部完成」按钮保留占位空间
+   （滚到底内容底 = 480 − 96 = 384 < 按钮顶 391，间隙 7px，卡片不被按钮遮挡）；
+   circle 下另加底部安全区 padding（130，见 circle 块） */
+.code-list {
+  height: 348px;
+  padding-bottom: 96px;
+}
+/* 列表项容器：卡片 420px 在内容区 470px（480−2×5）水平居中，左右各余 25px；
+   list-item 为行向 flex，justify-content: center 居中卡片 */
+.code-item {
+  flex-direction: row;
+  justify-content: center;
+  padding-left: 5px;
+  padding-right: 5px;
+}
+
+/* 单条取件码卡片：深灰圆角矩形（圆角 30px，与主页单卡/组卡同款），420×102
+   （宽 420px × 高 102px，flex-shrink: 0 防止 Vela flex 把固定高度卡片压缩）：
+   左侧主区（可点击行）+（无二维码时）右侧完成按钮；
+   高度核算（内容区 = 102 − 15×2 = 72px，padding 上下 15px）：
+   - 码字行：line-height 44px；
+   - 元信息行：line-height 26px + margin-top 2px；
+   - 主区合计 44 + 2 + 26 = 72px ≤ 72px ✓、完成按钮（line-height 28 + padding 8×2）= 44px ≤ 72px ✓；
+   - 合计 15 + 72 + 15 = 102px，不溢出、不裁字 */
+.code-card {
+  flex-direction: column;
+  flex-shrink: 0;
+  width: 420px;
+  height: 102px;
+  padding: 15px 22px;
+  margin-bottom: 5px;
+  border-radius: 30px;
+  background-color: #1f1f1f;
+}
+
+/* 卡片行：主区（可点击）与完成按钮并排；按钮为兄弟节点，点击不冒泡进主区点击逻辑 */
+.code-row {
+  flex: 1;
+  flex-direction: row;
+  align-items: center;
+}
+.code-main {
+  flex: 1;
+  flex-direction: column;
+  justify-content: center;
+  min-width: 0;
+}
+/* 大号取餐码数字：单行；字号 36px = 原大屏档值（466 档为 34px） */
+.code-text {
+  font-size: 36px;
+  line-height: 44px;
+  color: #ffffff;
+  font-weight: bold;
+  lines: 1;
+  text-overflow: ellipsis;
+}
+/* 元信息：类型·时间（如「取餐码 · 2024-07-21 14:30」）；字号 22px = 原大屏档值（466 档为 20px） */
+.code-meta {
+  font-size: 22px;
+  line-height: 26px;
+  color: #888888;
+  margin-top: 2px;
+  lines: 1;
+  text-overflow: ellipsis;
+}
+
+/* 完成按钮：无二维码取件码行右侧按钮（蓝色圆角 16px，与主页 .done-btn 同款，
+   字号 26px = 原大屏档值，466 档为 24px） */
+.done-btn {
+  font-size: 26px;
+  line-height: 28px;
+  color: #ffffff;
+  background-color: #0a84ff;
+  border-radius: 16px;
+  padding: 8px 14px;
+  margin-left: 8px;
+  text-align: center;
+  lines: 1;
+}
+
+/* 「全部完成」按钮：悬浮固定页面底部中间（absolute 定位于 .page 底部 24px，
+   不随 list 内容滚动；同 detail「已完成」按钮规格，字号 26px = 原大屏档值） */
+.btn-wrap {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 24px;
+  flex-direction: row;
+  justify-content: center;
+  align-items: center;
+}
+.all-done-btn {
+  flex-direction: row;
+  justify-content: center;
+  align-items: center;
+  height: 65px;
+  padding: 0 40px;
+  background-color: #0a84ff;
+  border-radius: 40px;
+}
+.all-done-text {
+  font-size: 26px;
+  color: #ffffff;
+  line-height: 44px;
+  lines: 1;
+}
+
+/* ═══ 屏幕分档（媒体查询长度单位为 dp；px 按 designWidth=480 对屏幕物理宽等比缩放）═══
+   ┌──────────┬────────────┬─────────┬──────┬──────────┐
+   │ 档位     │ 设备       │ 物理    │ dp宽 │ 缩放系数  │
+   ├──────────┼────────────┼─────────┼──────┼──────────┤
+   │ circle480│ S5         │ 480×480 │ 240  │ ×1.000   │
+   │ circle466│ S3         │ 466×466 │ 233  │ ×0.971   │
+   │ rect432  │ RW5 / RW6  │ 432×514 │ 216  │ ×0.900   │
+   │ rect336  │ 8/9/10Pro  │ 336×480 │ 168  │ ×0.700   │
+   └──────────┴────────────┴─────────┴──────┴──────────┘
+   档内设计值 = 物理目标 ÷ 缩放系数。 */
+
+/* circle480（S5 240dp，×1.000）：圆底安全区 padding-bottom 130px ——
+   内容底 350 处弦宽 2×√(240²−110²) ≈ 426.6 ≥ 卡片 420，左右各余 3.3px，最后一张完整显示；
+   不与悬浮按钮重叠（按钮顶 391 > 内容底 350，间隙 41px） */
+@media (shape: circle) and (min-width: 236) {
+  .code-list {
+    padding-bottom: 130px;
+  }
+}
+
+/* circle466（S3 233dp，×0.971）：字号/行高沿用基础档（等比同步，无需逐项重设）；
+   仅放大圆底安全区：半径 233，130px 时物理 126.2、内容底 339.8 处弦宽 414.1
+   比卡片 407.7 只余 3px/边，故取 140px（物理 135.9）：内容底 330.1，
+   弦宽 2×√(233²−97.1²) ≈ 423.6 ≥ 407.7，左右各余约 8px，完整不裁切 */
+@media (shape: circle) and (max-width: 236) {
+  .code-list {
+    padding-bottom: 140px;
+  }
+}
+
+/* rect432（RW5/RW6 216dp，×0.900）：方表设计 —— 保留「大码字 + 元信息」双行卡片，圆角适中。
+   几何核算（物理值 = 设计值 × 0.900）：
+   垂直：时钟 45.9 + 返回 44.1 + 计数 37.8 = 127.8，列表 386.1 → 合计 513.9 ✓（屏高 514）；
+   卡片 399.6×102.6（padding 上下 14.4/左右 21.6，圆角 26.1）：
+   主行 73.8 = 102.6 − 14.4×2；内容 = 码 44.1 + 1.8 + 元信息 22.5 = 68.4 ≤ 73.8 ✓ 余 5.4、
+   完成按钮（27.9+8.1×2）= 44.1 ≤ 73.8 ✓；
+   一屏（可视 386.1，卡片组 102.6+5.4 = 108）：3 张完整 + 第 4 张露出 386.1 − 324 = 62.1（≈57%） */
+@media (shape: rect) and (min-width: 192) {
+  .clock-bar {
+    display: none;
+  }
+  .top-time {
+    display: none;
+  }
+  .back-bar {
+    display: none;
+  }
+  .nav-bar {
+    display: flex;
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: center;
+    height: 80px;
+    padding-left: 34px;
+    padding-right: 34px;
+  }
+  .nav-left {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+  }
+  .nav-right {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+  }
+  .nav-title {
+    font-size: 36px;
+    margin-left: 6px;
+    line-height: 44px;
+    margin-top: 4px;
+  }
+  .nav-time {
+    font-size: 28px;
+    margin-left: 14px;
+  }
+  .nav-back {
+    font-size: 42px;
+    color: #ffffff;
+    margin-right: 6px;
+    line-height: 44px;
+  }
+  /* 返回按钮（手环/方表思路）：‹ 圆形字符按钮（深灰圆底），与标题同行靠左（见 nav-bar 单行导航），
+     不再与标题并排居中（圆表思路） */
+  .back-btn {
+    display: none;
+  }
+  .page-title {
+    margin-left: 0px;
+    margin-top: 4px;
+    max-width: 222px;
+    font-size: 36px;
+    line-height: 49px;
+    height: 49px;
+  }
+  .count-bar {
+    height: 42px;
+  }
+  .count-text {
+    font-size: 21px;
+  }
+  .empty-main {
+    font-size: 33px;
+  }
+  .empty-sub {
+    font-size: 27px;
+    margin-top: 18px;
+  }
+  .code-list {
+    height: 449px;
+    padding-bottom: 107px;
+  }
+  .code-item {
+    padding-left: 6px;
+    padding-right: 6px;
+  }
+  .code-card {
+    width: 444px;
+    height: 114px;
+    padding: 16px 24px;
+    margin-bottom: 6px;
+    border-radius: 29px;
+  }
+  .code-text {
+    font-size: 40px;
+    line-height: 49px;
+  }
+  .code-meta {
+    font-size: 24px;
+    line-height: 25px;
+    margin-top: 2px;
+  }
+  .done-btn {
+    font-size: 24px;
+    line-height: 31px;
+    padding: 9px 16px;
+    margin-left: 9px;
+  }
+  .btn-wrap {
+    bottom: 27px;
+  }
+  .all-done-btn {
+    height: 72px;
+    padding: 0 44px;
+    border-radius: 44px;
+  }
+  .all-done-text {
+    font-size: 29px;
+    line-height: 49px;
+  }
+}
+
+/* rect336（8Pro/9Pro/10Pro 168dp，×0.700）：手环设计（竖窄屏）—— 返回/标题加大贴边、
+   卡片全宽大圆角（非 480 档缩放）。
+   几何核算（物理值 = 设计值 × 0.700）：
+   垂直：时钟 44.1 + 返回 44.1 + 计数 35.7 = 123.9，列表 356.3 → 合计 480.2 ✓（屏高 480）；
+   卡片 308×102.2（padding 上下 13.3/左右 20.3，圆角 30.1）：
+   主行 75.6 = 102.2 − 13.3×2；内容 = 码 42.0 + 2.1 + 元信息 21.7 = 65.8 ≤ 75.6 ✓ 余 9.8、
+   完成按钮（23.8+6.3×2）= 36.4 ≤ 75.6 ✓；
+   一屏（可视 356.3，卡片组 102.2+4.9 ≈ 107.1）：3 张完整 + 第 4 张露出 356.3 − 321.3 = 35.0（≈33%） */
+@media (shape: rect) and (max-width: 192) {
+  .clock-bar {
+    display: none;
+  }
+  .top-time {
+    display: none;
+  }
+  .back-bar {
+    display: none;
+  }
+  .nav-bar {
+    display: flex;
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: center;
+    height: 103px;
+    padding-left: 43px;
+    padding-right: 43px;
+  }
+  .nav-left {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+  }
+  .nav-right {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+  }
+  .nav-title {
+    font-size: 36px;
+    margin-left: 6px;
+    line-height: 56px;
+    margin-top: 5px;
+  }
+  .nav-time {
+    font-size: 34px;
+    margin-left: 14px;
+  }
+  .nav-back {
+    font-size: 54px;
+    color: #ffffff;
+    margin-right: 8px;
+    line-height: 56px;
+  }
+  .back-btn {
+    display: none;
+  }
+  .page-title {
+    margin-left: 0px;
+    margin-top: 5px;
+    max-width: 214px;
+    font-size: 46px;
+    line-height: 63px;
+    height: 63px;
+  }
+  .count-bar {
+    height: 51px;
+  }
+  .count-text {
+    font-size: 26px;
+  }
+  .empty-main {
+    font-size: 37px;
+  }
+  .empty-sub {
+    font-size: 29px;
+    margin-top: 20px;
+  }
+  .code-list {
+    height: 532px;
+    padding-bottom: 137px;
+  }
+  .code-item {
+    padding-left: 7px;
+    padding-right: 7px;
+  }
+  .code-card {
+    width: 440px;
+    height: 146px;
+    padding: 19px 29px;
+    margin-bottom: 7px;
+    border-radius: 43px;
+  }
+  .code-text {
+    font-size: 47px;
+    line-height: 60px;
+  }
+  .code-meta {
+    font-size: 30px;
+    line-height: 31px;
+    margin-top: 3px;
+  }
+  .done-btn {
+    font-size: 26px;
+    line-height: 34px;
+    padding: 9px 16px;
+    margin-left: 9px;
+  }
+  .btn-wrap {
+    bottom: 34px;
+  }
+  .all-done-btn {
+    height: 92px;
+    padding: 0 56px;
+    border-radius: 56px;
+  }
+  .all-done-text {
+    font-size: 37px;
+    line-height: 62px;
+  }
+}
+
+/* 页面跳转动画关键帧（同 detail/completed 二级页）：
+   page-in：进入动画，右侧滑入 48px + 透明度 0→1（0.25s ease-out）
+   page-out：退出动画，反向滑出（透明度 1→0 + 右移 48px，0.22s ease-in） */
+@keyframes page-in {
+  from {
+    opacity: 0;
+    transform: translateX(48px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0px);
+  }
+}
+
+@keyframes page-out {
+  from {
+    opacity: 1;
+    transform: translateX(0px);
+  }
+  to {
+    opacity: 0;
+    transform: translateX(48px);
+  }
+}
+</style>
+
+<script>
+import router from "@system.router"
+
+export default {
+  private: {
+    groupId: "",
+    pageTitle: "",
+    countText: "",
+    items: [],
+    clockText: "",
+    clockTimerId: null,
+    watcherId: null,
+    lastVersion: -1,
+    backTimerId: null,
+    leaving: false,
+    bypassBack: false,
+    allDoneClicked: false
+  },
+
+  onInit() {
+    const params = router.getParams()
+    this.groupId =
+      params && params.groupId !== undefined && params.groupId !== null
+        ? String(params.groupId)
+        : ""
+  },
+
+  onShow() {
+    this.loadGroup()
+    this.startClock()
+    this.startWatcher()
+  },
+
+  onHide() {
+    this.stopClock()
+    this.stopWatcher()
+  },
+
+  onDestroy() {
+    this.stopClock()
+    this.stopWatcher()
+    // 清理退出动画延迟返回定时器，防止页面销毁后定时器仍触发 router.back()
+    if (this.backTimerId) {
+      clearTimeout(this.backTimerId)
+      this.backTimerId = null
+    }
+  },
+
+  // ═══ 数据：从共享快照加载本组取件码（快照为唯一数据源）═══
+
+  loadGroup() {
+    const s = this.$app.$def.syncState
+    const orders = s && s.snapshot ? s.snapshot.payload || [] : []
+    const groupId = this.groupId
+    const items = []
+    let firstOrder = null
+    orders.forEach(function (order) {
+      if (!order || !groupId || String(order.groupId) !== groupId) return
+      if (!firstOrder) firstOrder = order
+      const typeText = order.orderType === "快递" ? "取件码" : "取餐码"
+      const timeText = this.formatTime(order.createdAt)
+      items.push({
+        itemId: order.orderId || "code-" + items.length,
+        orderId: order.orderId,
+        code: order.code || "",
+        hasQr: !!order.qrCodeData,
+        metaText: timeText ? typeText + " · " + timeText : typeText
+      })
+    }, this)
+    this.items = items
+    const firstTypeText = firstOrder
+      ? firstOrder.orderType === "快递"
+        ? "取件码"
+        : "取餐码"
+      : "取件码"
+    this.pageTitle = firstOrder ? firstOrder.brandName || firstTypeText : ""
+    this.countText = "共 " + items.length + " 个" + firstTypeText
+    this.lastVersion = s ? s.syncVersion : this.lastVersion
+  },
+
+  // 毫秒时间戳 → YYYY-MM-DD HH:mm（手动补零；环境 Date 不可用或解析失败时降级显示时间戳前 10 位）
+  formatTime(ts) {
+    if (!ts) return ""
+    try {
+      if (typeof Date !== "undefined" && typeof Date.prototype.getFullYear === "function") {
+        const d = new Date(ts)
+        if (!isNaN(d.getTime())) {
+          const pad = function (n) {
+            return (n < 10 ? "0" : "") + n
+          }
+          return (
+            d.getFullYear() +
+            "-" +
+            pad(d.getMonth() + 1) +
+            "-" +
+            pad(d.getDate()) +
+            " " +
+            pad(d.getHours()) +
+            ":" +
+            pad(d.getMinutes())
+          )
+        }
+      }
+    } catch (e) {
+      // 忽略，走降级
+    }
+    return String(ts).slice(0, 10)
+  },
+
+  // ═══ 顶部时钟（HH:mm，10s 刷新；onShow 启动 / onHide、onDestroy 清理）═══
+
+  startClock() {
+    this.updateClock()
+    if (this.clockTimerId) return
+    let self = this
+    this.clockTimerId = setInterval(function () {
+      self.updateClock()
+    }, 10000)
+  },
+
+  stopClock() {
+    if (this.clockTimerId) {
+      clearInterval(this.clockTimerId)
+      this.clockTimerId = null
+    }
+  },
+
+  updateClock() {
+    try {
+      const d = new Date()
+      if (typeof d.getHours !== "function" || isNaN(d.getTime())) {
+        this.clockText = ""
+        return
+      }
+      const pad = function (n) {
+        return (n < 10 ? "0" : "") + n
+      }
+      this.clockText = pad(d.getHours()) + ":" + pad(d.getMinutes())
+    } catch (e) {
+      this.clockText = ""
+    }
+  },
+
+  // ═══ 实时刷新（同步期间快照被 app 更新时）═══
+
+  startWatcher() {
+    if (this.watcherId) return
+    let self = this
+    this.watcherId = setInterval(function () {
+      const s = self.$app.$def.syncState
+      if (s && s.syncVersion !== self.lastVersion) {
+        self.loadGroup()
+      }
+    }, 600)
+  },
+
+  stopWatcher() {
+    if (this.watcherId) {
+      clearInterval(this.watcherId)
+      this.watcherId = null
+    }
+  },
+
+  // ═══ 交互 ═══
+
+  // 行点击：有二维码 → 进该取件码详情页（展示二维码）；无二维码 → 兜底（右侧完成按钮就地完成）
+  onRowClick(idx) {
+    const item = this.items[idx]
+    if (!item || !item.hasQr) return
+    router.push({
+      uri: this.$app.$def.getDeviceRoute("detail"),
+      params: {orderId: item.orderId}
+    })
+  },
+
+  // 单条完成：就地标记该取件码完成并刷新（快照更新后该条移除）
+  onMarkOne(idx) {
+    const item = this.items[idx]
+    if (!item || !item.orderId) return
+    this.$app.$def.markDone(item.orderId)
+    this.loadGroup()
+  },
+
+  // 全部完成：本组全部标记完成并返回列表（标志位防重复点击）
+  onMarkAll() {
+    if (this.allDoneClicked) return
+    this.allDoneClicked = true
+    this.items.forEach(function (item) {
+      if (item && item.orderId) {
+        this.$app.$def.markDone(item.orderId)
+      }
+    }, this)
+    this.loadGroup()
+    router.back()
+  },
+
+  // 返回：先播退出动画（0.22s），动画播完后由定时器（220ms，与动画时长对应）调 router.back()；
+  // leaving 标志防重复点击；页面返回按钮与系统返回手势/按键均走退出动画（onBackPress 拦截后复用）
+  onBack() {
+    if (this.leaving) return
+    this.leaving = true
+    let self = this
+    this.backTimerId = setTimeout(function () {
+      self.backTimerId = null
+      self.bypassBack = true
+      router.back()
+    }, 220)
+  },
+
+  // 系统返回键/返回手势拦截：统一走退出动画链路（onBack 含防重复）；
+  // return true 阻止引擎默认立即返回；程序化 router.back() 前已置 bypassBack 放行（return false）
+  onBackPress() {
+    if (this.bypassBack) return false
+    this.onBack()
+    return true
+  }
+}
+</script>

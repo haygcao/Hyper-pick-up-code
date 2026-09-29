@@ -20,6 +20,7 @@ import com.Badnng.moe.helper.DailyExpressGroupingHelper
 import com.Badnng.moe.helper.NotificationHelper
 import com.Badnng.moe.recognition.RecognizedOrderFactory
 import com.Badnng.moe.recognition.RecognitionRouter
+import com.Badnng.moe.recognition.RecognitionTextSource
 import com.Badnng.moe.recognition.RecognitionTrigger
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -54,9 +55,12 @@ class ProcessTextRecognitionService : Service() {
     }
     
     private suspend fun processText(selectedText: String) {
+        // 划词属于泛化文本来源（SimpleRuleSource.TEXT）。此前未显式传 source，
+        // 依赖默认值，快递模板一旦限定来源就会在划词入口失效。
         val routedResult = RecognitionRouter(applicationContext).recognizeText(
             selectedText,
-            trigger = RecognitionTrigger.PROCESS_TEXT,
+            RecognitionTextSource.General,
+            RecognitionTrigger.PROCESS_TEXT,
         )
         val results = routedResult.orders
 
@@ -67,7 +71,11 @@ class ProcessTextRecognitionService : Service() {
 
         if (results.isEmpty()) {
             withContext(Dispatchers.Main) {
-                Toast.makeText(applicationContext, "未识别到取件码", Toast.LENGTH_SHORT).show()
+                Toast.makeText(
+                    applicationContext,
+                    "未识别到取件码",
+                    Toast.LENGTH_SHORT,
+                ).show()
             }
             return
         }
@@ -92,7 +100,11 @@ class ProcessTextRecognitionService : Service() {
 
         if (insertedOrders.isEmpty()) {
             withContext(Dispatchers.Main) {
-                Toast.makeText(applicationContext, "未识别到取件码", Toast.LENGTH_SHORT).show()
+                Toast.makeText(
+                    applicationContext,
+                    "未识别到取件码",
+                    Toast.LENGTH_SHORT,
+                ).show()
             }
             return
         }
@@ -116,7 +128,11 @@ class ProcessTextRecognitionService : Service() {
                 }
             }
             withContext(Dispatchers.Main) {
-                Toast.makeText(applicationContext, "新识别取件码已自动整理", Toast.LENGTH_SHORT).show()
+                Toast.makeText(
+                    applicationContext,
+                    "新识别取件码已自动整理",
+                    Toast.LENGTH_SHORT,
+                ).show()
             }
         } else {
             refreshedOrders.forEach { order ->
@@ -124,9 +140,20 @@ class ProcessTextRecognitionService : Service() {
             }
             val firstCode = refreshedOrders.firstOrNull()?.takeoutCode
             withContext(Dispatchers.Main) {
-                Toast.makeText(applicationContext, if (firstCode != null) "识别成功：$firstCode" else "识别成功", Toast.LENGTH_SHORT).show()
+                Toast.makeText(
+                    applicationContext,
+                    if (firstCode != null) "识别成功：$firstCode" else "识别成功",
+                    Toast.LENGTH_SHORT,
+                ).show()
             }
         }
+
+        // 手表通知：等分组整理完成后再发——同一组（组卡片）只发一条，未成组的仍一码一条。
+        // 此前是在入库循环里逐单发，组卡片到了手表上就变成 N 条通知。
+        com.Badnng.moe.wearable.WearableSyncManager.notifySavedOrders(
+            applicationContext,
+            refreshedOrders,
+        )
     }
     
     private fun createNotification(): Notification {

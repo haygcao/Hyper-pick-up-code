@@ -142,8 +142,8 @@ class ScreenCaptureService : Service() {
             try {
                 bitmap = captureShizukuScreenshot()
                 if (bitmap != null) {
-                    val recognitionBitmap = prepareRecognitionBitmap(bitmap)
-                    recognizeAndStop(recognitionBitmap, appName, pkg, triggeredByAccessibilityShortcut)
+                    val detailBitmap = bitmap.copy(Bitmap.Config.ARGB_8888, false)
+                    recognizeAndStop(detailBitmap, appName, pkg, triggeredByAccessibilityShortcut)
                 } else {
                     AppLogger.service("Shizuku capture returned null bitmap")
                     stopSelf()
@@ -174,8 +174,8 @@ class ScreenCaptureService : Service() {
             try {
                 bitmap = RootHelper.captureScreenshot()
                 if (bitmap != null) {
-                    val recognitionBitmap = prepareRecognitionBitmap(bitmap)
-                    recognizeAndStop(recognitionBitmap, appName, pkg, triggeredByAccessibilityShortcut)
+                    val detailBitmap = bitmap.copy(Bitmap.Config.ARGB_8888, false)
+                    recognizeAndStop(detailBitmap, appName, pkg, triggeredByAccessibilityShortcut)
                 } else {
                     AppLogger.service("Root capture returned null bitmap")
                     withContext(Dispatchers.Main) {
@@ -307,8 +307,8 @@ class ScreenCaptureService : Service() {
                 )
                 bitmap.copyPixelsFromBuffer(buffer)
                 cleanBitmap = Bitmap.createBitmap(bitmap, 0, 0, image.width, image.height)
-                val recognitionBitmap = prepareRecognitionBitmap(cleanBitmap)
-                recognizeAndStop(recognitionBitmap, appName, pkg, triggeredByAccessibilityShortcut)
+                val detailBitmap = cleanBitmap.copy(Bitmap.Config.ARGB_8888, false)
+                recognizeAndStop(detailBitmap, appName, pkg, triggeredByAccessibilityShortcut)
             } catch (e: Exception) {
                 Log.e("CaptureLog", "MediaProjection capture failed", e)
                 stopSelf()
@@ -320,35 +320,16 @@ class ScreenCaptureService : Service() {
         }
     }
 
-    private fun cropStatusBar(src: Bitmap): Bitmap {
-        val statusBarHeight = 150
-        val sideMargin = (src.width * 0.02).toInt()
-        val targetWidth = (src.width * 0.92).toInt()
-        val targetHeight = (src.height * 0.81).toInt()
-        return if (src.height > statusBarHeight + targetHeight && src.width > sideMargin + targetWidth) {
-            Bitmap.createBitmap(src, sideMargin, statusBarHeight, targetWidth, targetHeight)
-        } else {
-            src
-        }
-    }
-
-    private fun prepareRecognitionBitmap(src: Bitmap): Bitmap {
-        if (OnlineRecognitionPreferences.isOnline(applicationContext)) {
-            return src.copy(Bitmap.Config.ARGB_8888, false)
-        }
-        val cropped = cropStatusBar(src)
-        return if (cropped === src) {
-            src.copy(Bitmap.Config.ARGB_8888, false)
-        } else {
-            cropped
-        }
-    }
-
-    private fun recognizeAndStop(bitmap: Bitmap, sourceApp: String?, sourcePkg: String?, triggeredByAccessibilityShortcut: Boolean) {
+    private fun recognizeAndStop(
+        detailBitmap: Bitmap,
+        sourceApp: String?,
+        sourcePkg: String?,
+        triggeredByAccessibilityShortcut: Boolean,
+    ) {
         scope.launch {
             try {
                 val routedResult = RecognitionRouter(applicationContext).recognizeImage(
-                    bitmap,
+                    detailBitmap,
                     sourceApp,
                     sourcePkg,
                     RecognitionTrigger.SCREEN_CAPTURE,
@@ -358,14 +339,17 @@ class ScreenCaptureService : Service() {
                     Log.w("CaptureLog", "Online recognition fallback: $it")
                 }
 
-                if (recognizedOrders.isEmpty()) {
+                val successfulResults = recognizedOrders
+                    .filter { it.code != null }
+                    .distinctBy { it.code }
+                if (successfulResults.isEmpty()) {
                     Log.d("CaptureLog", "No code recognized")
                     return@launch
                 }
 
                 val screenshotPath = ScreenshotStorage.saveBitmap(
                     applicationContext,
-                    bitmap,
+                    detailBitmap,
                     namePrefix = "识屏",
                 )
 
@@ -373,7 +357,7 @@ class ScreenCaptureService : Service() {
                 val orderGroupDao = database.orderGroupDao()
                 val orderDao = database.orderDao()
                 val insertedOrders = mutableListOf<OrderEntity>()
-                for (result in recognizedOrders) {
+                for (result in successfulResults) {
                     val code = result.code ?: continue
                     AppLogger.recognition("code=$code, type=${result.type}, brand=${result.brand}, pickup=${result.pickupLocation}")
                     val order = RecognizedOrderFactory.fromRecognition(
@@ -420,6 +404,13 @@ class ScreenCaptureService : Service() {
                     }
                 }
 
+                // 手表通知：等分组整理完成后再发——同一组（组卡片）只发一条，未成组的仍一码一条。
+                // 此前是在入库循环里逐单发，组卡片到了手表上就变成 N 条通知。
+                com.Badnng.moe.wearable.WearableSyncManager.notifySavedOrders(
+                    applicationContext,
+                    refreshedInsertedOrders,
+                )
+
                 refreshedInsertedOrders
                     .filter { it.groupId == null }
                     .forEach { order ->
@@ -446,9 +437,7 @@ class ScreenCaptureService : Service() {
                     ).show()
                 }
             } finally {
-                if (!bitmap.isRecycled) {
-                    bitmap.recycle()
-                }
+                if (!detailBitmap.isRecycled) detailBitmap.recycle()
                 stopSelf()
             }
         }

@@ -26,7 +26,6 @@ import com.Badnng.moe.helper.DailyExpressGroupingHelper
 import com.Badnng.moe.helper.ImageSourceMetadataResolver
 import com.Badnng.moe.helper.NotificationHelper
 import com.Badnng.moe.helper.ScreenshotStorage
-import com.Badnng.moe.recognition.OnlineRecognitionPreferences
 import com.Badnng.moe.recognition.RecognizedOrderFactory
 import com.Badnng.moe.recognition.RecognitionRouter
 import com.Badnng.moe.recognition.RecognitionTrigger
@@ -80,8 +79,6 @@ class ShareRecognitionService : Service() {
             return
         }
 
-        val onlineRecognition = OnlineRecognitionPreferences.isOnline(applicationContext)
-        val croppedBitmap = if (onlineRecognition) bitmap else cropStatusBar(bitmap)
         try {
             val routedResult = RecognitionRouter(applicationContext).recognizeImage(
                 bitmap,
@@ -93,22 +90,15 @@ class ShareRecognitionService : Service() {
             routedResult.onlineError?.let {
                 Log.w("ShareRecognition", "Online recognition fallback: $it")
             }
-            val hasExpressKeyword = recognizedOrders.any { result ->
-                result.type == "快递" ||
-                    result.fullText.contains("取件") ||
-                    result.fullText.contains("取货") ||
-                    result.fullText.contains("快递") ||
-                    result.fullText.contains("驿站") ||
-                    result.fullText.contains("菜鸟")
-            }
-            val bitmapToUse = if (onlineRecognition || hasExpressKeyword) bitmap else croppedBitmap
-
-            if (recognizedOrders.isEmpty()) {
+            val successfulResults = recognizedOrders
+                .filter { it.code != null }
+                .distinctBy { it.code }
+            if (successfulResults.isEmpty()) {
                 AppLogger.recognition("ShareRecognition: no codes found")
                 withContext(Dispatchers.Main) {
                     Toast.makeText(
                         applicationContext,
-                        "\u672a\u8bc6\u522b\u5230\u53d6\u4ef6\u7801",
+                        "未识别到取件码",
                         Toast.LENGTH_SHORT
                     ).show()
                 }
@@ -117,7 +107,7 @@ class ShareRecognitionService : Service() {
 
             val screenshotPath = ScreenshotStorage.saveBitmap(
                 applicationContext,
-                bitmapToUse,
+                bitmap,
                 namePrefix = "分享识别",
             )
 
@@ -125,7 +115,7 @@ class ShareRecognitionService : Service() {
             val orderDao = database.orderDao()
             val orderGroupDao = database.orderGroupDao()
             val insertedOrders = mutableListOf<OrderEntity>()
-            for (result in recognizedOrders) {
+            for (result in successfulResults) {
                 val code = result.code ?: continue
                 AppLogger.recognition("ShareRecognition code=$code, type=${result.type}, brand=${result.brand}, pickup=${result.pickupLocation}")
                 val order = RecognizedOrderFactory.fromRecognition(
@@ -172,6 +162,13 @@ class ShareRecognitionService : Service() {
                 }
             }
 
+            // 手表通知：等分组整理完成后再发——同一组（组卡片）只发一条，未成组的仍一码一条。
+            // 此前是在入库循环里逐单发，组卡片到了手表上就变成 N 条通知。
+            com.Badnng.moe.wearable.WearableSyncManager.notifySavedOrders(
+                applicationContext,
+                refreshedInsertedOrders,
+            )
+
             refreshedInsertedOrders
                 .filter { it.groupId == null }
                 .forEach { order ->
@@ -193,21 +190,6 @@ class ShareRecognitionService : Service() {
             LocalBroadcastManager.getInstance(applicationContext).sendBroadcast(refreshIntent)
         } finally {
             bitmap.recycle()
-            if (croppedBitmap != bitmap) {
-                croppedBitmap.recycle()
-            }
-        }
-    }
-
-    private fun cropStatusBar(src: Bitmap): Bitmap {
-        val statusBarHeight = 150
-        val sideMargin = (src.width * 0.02).toInt()
-        val targetWidth = (src.width * 0.92).toInt()
-        val targetHeight = (src.height * 0.81).toInt()
-        return if (src.height > statusBarHeight + targetHeight && src.width > sideMargin + targetWidth) {
-            Bitmap.createBitmap(src, sideMargin, statusBarHeight, targetWidth, targetHeight)
-        } else {
-            src
         }
     }
 

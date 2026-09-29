@@ -3,6 +3,7 @@ package com.Badnng.moe.ui.component
 import android.graphics.Bitmap
 import android.os.Build
 import android.provider.MediaStore
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -43,6 +44,7 @@ import androidx.core.view.WindowCompat
 import com.Badnng.moe.data.db.OrderEntity
 import com.Badnng.moe.helper.ImageSourceMetadataResolver
 import com.Badnng.moe.helper.ScreenshotStorage
+import com.Badnng.moe.ocr.RecognitionResult
 import com.Badnng.moe.recognition.RecognizedOrderFactory
 import com.Badnng.moe.recognition.RecognitionExecutionMetadata
 import com.Badnng.moe.recognition.RecognitionRouter
@@ -162,6 +164,7 @@ fun AddOrderBottomSheet(
         var imageSourceApp by remember { mutableStateOf<String?>(null) }
         var imageSourcePackage by remember { mutableStateOf<String?>(null) }
         var recognitionMetadata by remember { mutableStateOf<RecognitionExecutionMetadata?>(null) }
+        var additionalRecognizedResults by remember { mutableStateOf(emptyList<RecognitionResult>()) }
         val options = listOf("餐食", "饮品", "快递")
         var screenshotPath by remember { mutableStateOf<String?>(null) }
 
@@ -175,6 +178,7 @@ fun AddOrderBottomSheet(
                     imageSourcePackage = imageSource.packageName
                     recognizedFullText = null
                     recognitionMetadata = null
+                    additionalRecognizedResults = emptyList()
                     screenshotPath = null
                     val originalBitmap = if (Build.VERSION.SDK_INT >= 28) {
                         android.graphics.ImageDecoder.decodeBitmap(android.graphics.ImageDecoder.createSource(context.contentResolver, uri))
@@ -182,23 +186,17 @@ fun AddOrderBottomSheet(
                         @Suppress("DEPRECATION")
                         MediaStore.Images.Media.getBitmap(context.contentResolver, uri)
                     }
-                    val statusBarHeight = 150
-                    val sideMargin = (originalBitmap.width * 0.02).toInt()
-                    val targetWidth = (originalBitmap.width * 0.96).toInt()
-                    val targetHeight = (originalBitmap.height * 0.81).toInt()
-                    val bitmap = if (OnlineRecognitionPreferences.isOnline(context)) {
-                        originalBitmap
-                    } else if (originalBitmap.height > statusBarHeight + targetHeight && originalBitmap.width > sideMargin + targetWidth) {
-                        Bitmap.createBitmap(originalBitmap, sideMargin, statusBarHeight, targetWidth, targetHeight)
-                    } else originalBitmap
-
                     val routedResult = RecognitionRouter(context).recognizeImage(
-                        bitmap,
+                        originalBitmap,
                         imageSourceApp,
                         imageSourcePackage,
                         RecognitionTrigger.IMPORTED_IMAGE,
                     )
-                    val result = routedResult.orders.firstOrNull()
+                    val successfulResults = routedResult.orders
+                        .filter { it.code != null }
+                        .distinctBy { it.code }
+                    val result = successfulResults.firstOrNull() ?: routedResult.orders.firstOrNull()
+                    additionalRecognizedResults = successfulResults.drop(1)
                     recognitionMetadata = routedResult.metadata
                     text = result?.code ?: ""
                     detectedQrData = result?.qr
@@ -209,11 +207,19 @@ fun AddOrderBottomSheet(
                         pickupLocation = it.pickupLocation
                     }
                     if (result?.code != null) {
-                        screenshotPath = ScreenshotStorage.saveBitmap(
+                        val savedScreenshotPath = ScreenshotStorage.saveBitmap(
                             context,
-                            bitmap,
+                            originalBitmap,
                             namePrefix = "导入图片",
                         )
+                        screenshotPath = savedScreenshotPath
+                        if (successfulResults.size > 1) {
+                            Toast.makeText(
+                                context,
+                                "识别到 ${successfulResults.size} 个取件码，添加时将一并保存",
+                                Toast.LENGTH_SHORT,
+                            ).show()
+                        }
                     }
                 }
             }
@@ -295,6 +301,23 @@ fun AddOrderBottomSheet(
                                 )
                             }
                             viewModel.addOrder(order)
+                            val metadata = recognitionMetadata
+                            val sharedScreenshotPath = screenshotPath
+                            if (metadata != null && sharedScreenshotPath != null) {
+                                additionalRecognizedResults
+                                    .filterNot { it.code == text }
+                                    .mapNotNull { result ->
+                                        RecognizedOrderFactory.fromRecognition(
+                                            result = result,
+                                            metadata = metadata,
+                                            screenshotPath = sharedScreenshotPath,
+                                            recognizedText = "图片识别",
+                                            sourceApp = imageSourceApp ?: "图片识别",
+                                            sourcePackage = imageSourcePackage,
+                                        )
+                                    }
+                                    .forEach(viewModel::addOrder)
+                            }
                             dismiss?.invoke()
                         },
                         modifier = Modifier.weight(1f),

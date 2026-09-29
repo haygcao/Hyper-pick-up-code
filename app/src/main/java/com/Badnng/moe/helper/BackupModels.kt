@@ -106,6 +106,7 @@ internal data class BackupOrder(
 internal data class BackupGroup(
     val group: com.Badnng.moe.data.db.OrderGroup,
     val screenshotEntry: String?,
+    val screenshotEntries: List<String> = emptyList(),
 )
 
 internal data class NormalizedSettings(
@@ -124,7 +125,6 @@ internal object BackupSettingsPolicy {
         "theme_color",
         "use_floating_nav_bar",
         "miuix_floating_nav_bar_style",
-        "large_screen_nav_adaptive_enabled",
         "nav_alignment",
         "haptic_enabled",
         "predictive_back_enabled",

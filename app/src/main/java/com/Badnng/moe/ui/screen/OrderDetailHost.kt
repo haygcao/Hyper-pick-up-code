@@ -43,6 +43,11 @@ fun OrderDetailHost(
     order: OrderEntity,
     bottomSpacing: Dp,
     modifier: Modifier = Modifier,
+    /**
+     * 顶栏占用的高度。必须由列表的 contentPadding 让出来（见 [OrderDetailUiState.topSpacing]），
+     * 传进来后内容才能滑到顶栏下面并被顶栏的 ProgressiveBlur 采样。
+     */
+    topSpacing: Dp = 0.dp,
 ) {
     val context = LocalContext.current
     val configuration = LocalConfiguration.current
@@ -124,6 +129,7 @@ fun OrderDetailHost(
             screenshotPreviewMaxHeight = screenshotPreviewMaxHeight,
             screenshotCornerPercents = screenshotCornerPercents,
             bottomSpacing = bottomSpacing,
+            topSpacing = topSpacing,
             ocrDebugState = ocrDebugState,
             hideLowConfidenceOcr = hideLowConfidenceOcr,
         ),
@@ -161,7 +167,7 @@ fun OrderDetailHost(
     }
 }
 
-private fun shareOriginalScreenshot(context: Context, location: String) {
+internal fun shareOriginalScreenshot(context: Context, location: String) {
     val uri = ScreenshotStorage.shareUri(context, location)
     if (uri == null) {
         Toast.makeText(context, "原图不可用", Toast.LENGTH_SHORT).show()
@@ -197,7 +203,7 @@ private fun formatOcrDebugResult(result: PaddleOcrHelper.DiagnosticResult): Stri
 }.trimEnd()
 
 @Composable
-private fun rememberDisplayCornerPercents(): ScreenshotCornerPercents {
+internal fun rememberDisplayCornerPercents(): ScreenshotCornerPercents {
     val view = LocalView.current
     val configuration = LocalConfiguration.current
     var corners by remember(view) { mutableStateOf(ScreenshotCornerPercents()) }

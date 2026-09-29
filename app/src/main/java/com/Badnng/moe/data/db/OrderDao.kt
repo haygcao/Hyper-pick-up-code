@@ -34,6 +34,9 @@ interface OrderDao {
     @Query("SELECT * FROM orders WHERE isCompleted = 1 ORDER BY completedAt DESC")
     fun getCompletedOrders(): Flow<List<OrderEntity>>
 
+    @Query("SELECT takeoutCode FROM orders WHERE fullText = :fullText AND takeoutCode != ''")
+    suspend fun getRecognizedCodesByText(fullText: String): List<String>
+
     @Query("UPDATE orders SET isCompleted = 1, completedAt = :completedTime WHERE id = :orderId")
     suspend fun markAsCompleted(orderId: String, completedTime: Long)
 

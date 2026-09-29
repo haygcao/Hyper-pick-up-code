@@ -6,12 +6,14 @@ import android.os.SystemClock
 import android.util.Log
 import android.widget.Toast
 import com.Badnng.moe.ocr.MultiRecognitionResult
+import com.Badnng.moe.ocr.EngineRecognitionSummary
 import com.Badnng.moe.ocr.OcrDiagnosticSnapshotCodec
 import com.Badnng.moe.ocr.OcrDiagnosticsPreferences
 import com.Badnng.moe.ocr.RecognitionResult
 import com.Badnng.moe.ocr.TextRecognitionHelper
 import com.Badnng.moe.privacy.PrivacyConsent
 import com.Badnng.moe.rules.RecognitionRuleEngine
+import com.Badnng.moe.rules.LuckinQrRule
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.common.InputImage
 import kotlinx.coroutines.Dispatchers
@@ -43,7 +45,7 @@ class RecognitionRouter(context: Context) {
     ): RoutedRecognitionResult {
         val startedAt = SystemClock.elapsedRealtime()
         if (!OnlineRecognitionPreferences.isOnline(appContext)) {
-            val offlineResult = offlineRecognizeImage(bitmap, sourceApp, sourcePackage)
+            val offlineResult = offlineRecognizeImage(bitmap, sourceApp, sourcePackage, trigger)
             return RoutedRecognitionResult(
                 orders = offlineResult.orders,
                 metadata = RecognitionExecutionMetadata(
@@ -74,8 +76,9 @@ class RecognitionRouter(context: Context) {
                 mimoBillingMode = OnlineRecognitionPreferences.mimoBillingMode(appContext),
                 barcodeBrandHint = qrBrand?.name,
             )
-            if (orders.isEmpty() && qrBrand != null) {
-                throw OnlineRecognitionException("在线识别未返回${qrBrand.name}二维码订单")
+            if (orders.isEmpty()) {
+                val message = qrBrand?.let { "在线识别未返回${it.name}二维码订单" } ?: "在线识别未返回有效订单"
+                throw OnlineRecognitionException(message)
             }
             RoutedRecognitionResult(
                 orders = mergeBarcodeResult(orders, qrCode, qrBrand),
@@ -93,7 +96,7 @@ class RecognitionRouter(context: Context) {
             val message = RecognitionDiagnosticRedactor.redact(error.message ?: "在线识别失败", secrets)
                 ?: "在线识别失败"
             notifyOfflineFallback()
-            val offlineResult = offlineRecognizeImage(bitmap, sourceApp, sourcePackage)
+            val offlineResult = offlineRecognizeImage(bitmap, sourceApp, sourcePackage, trigger)
             RoutedRecognitionResult(
                 orders = offlineResult.orders,
                 metadata = RecognitionExecutionMetadata(
@@ -135,7 +138,7 @@ class RecognitionRouter(context: Context) {
 
         if (!OnlineRecognitionPreferences.isOnline(appContext)) {
             return RoutedRecognitionResult(
-                orders = offlineRecognizeText(text),
+                orders = offlineRecognizeText(text, source),
                 metadata = RecognitionExecutionMetadata(
                     mode = RecognitionMode.OFFLINE,
                     inputType = RecognitionInputType.TEXT,
@@ -175,7 +178,7 @@ class RecognitionRouter(context: Context) {
                 ?: "在线识别失败"
             notifyOfflineFallback()
             RoutedRecognitionResult(
-                orders = offlineRecognizeText(text),
+                orders = offlineRecognizeText(text, source),
                 metadata = RecognitionExecutionMetadata(
                     mode = RecognitionMode.ONLINE,
                     inputType = RecognitionInputType.TEXT,
@@ -203,7 +206,7 @@ class RecognitionRouter(context: Context) {
         val orders = if (shouldBlockText(text, source)) {
             emptyList()
         } else {
-            offlineRecognizeText(text)
+            offlineRecognizeText(text, source)
         }
         return RoutedRecognitionResult(
             orders = orders,
@@ -226,7 +229,7 @@ class RecognitionRouter(context: Context) {
     }
 
     private fun requirePrivacyConsent() {
-        if (!PrivacyConsent.isAccepted(settings)) {
+        if (!PrivacyConsent.isCurrentPolicyAccepted(settings)) {
             throw OnlineRecognitionException("尚未同意《澎湃记用户协议与隐私说明》")
         }
     }
@@ -235,54 +238,115 @@ class RecognitionRouter(context: Context) {
         bitmap: Bitmap,
         sourceApp: String?,
         sourcePackage: String?,
+        trigger: RecognitionTrigger,
     ): OfflineImageRecognition {
+        val recognitionBitmap = cropForOfflineRecognition(bitmap, trigger)
         if (!RecognitionRuleEngine.isInitialized) {
             RecognitionRuleEngine.initialize(appContext)
         }
         val helper = TextRecognitionHelper(appContext)
         return try {
             if (!helper.paddleOcr.isInitialized) helper.initOcr()
-            val (singleResult, ocrResult) = helper.recognizeAll(bitmap, sourceApp, sourcePackage)
-            val hasExpressKeyword = singleResult.fullText.contains("取件") ||
-                singleResult.fullText.contains("取货") ||
-                singleResult.fullText.contains("快递") ||
-                singleResult.fullText.contains("驿站") ||
-                singleResult.fullText.contains("菜鸟")
-            val multiResult = if (hasExpressKeyword || singleResult.type == "快递") {
-                helper.recognizeMultipleCodesFromResult(
-                    ocrResult.rawFullText,
-                    ocrResult.textBlocks,
-                    ocrResult.mergedText,
-                    sourceApp,
-                    sourcePackage,
+            val (singleResult, ocrResult) = helper.recognizeAll(recognitionBitmap, sourceApp, sourcePackage)
+            // 词汇引擎优先：引擎识别出多个码时（分享快递列表图等），直接生成多订单，
+            // 不再被 SimpleRule 模板结果覆盖（模板只在引擎无结果时兜底）。
+            val engineResult = ocrResult.engineResult
+            // 页面级裁决：只把引擎选中的候选建成订单（默认单码），避免「数据一杂就多框」；
+            // 全部候选仍写进诊断摘要（codeCount / codes）便于排查。
+            val selectedEngineCodes = engineResult?.let { er -> er.selectedCodes.ifEmpty { er.codes } }.orEmpty()
+            val orders = if (engineResult != null && selectedEngineCodes.isNotEmpty()) {
+                selectedEngineCodes.map { code ->
+                    RecognitionResult(
+                        code = code.code,
+                        qr = singleResult.qr,
+                        type = engineResult.pageType,
+                        brand = engineResult.brand?.name,
+                        fullText = ocrResult.rawFullText,
+                        pickupLocation = null,
+                    )
+                }
+            } else {
+                val hasExpressKeyword = singleResult.fullText.contains("取件") ||
+                    singleResult.fullText.contains("取货") ||
+                    singleResult.fullText.contains("快递") ||
+                    singleResult.fullText.contains("驿站") ||
+                    singleResult.fullText.contains("菜鸟")
+                val usesSimpleRulePack = com.Badnng.moe.rules.SimpleRuleRuntime.current().schemaVersion ==
+                    com.Badnng.moe.rules.SimpleRulePack.SCHEMA_VERSION
+                val multiResult = if (usesSimpleRulePack || hasExpressKeyword || singleResult.type == "快递") {
+                    helper.recognizeMultipleCodesFromResult(
+                        rawFullText = ocrResult.rawFullText,
+                        textBlocks = ocrResult.textBlocks,
+                        mergedText = ocrResult.mergedText,
+                        sourceApp = sourceApp,
+                        sourcePkg = sourcePackage,
+                        qrData = singleResult.qr,
+                        simpleRuleMatches = ocrResult.simpleRuleMatches,
+                    )
+                } else {
+                    MultiRecognitionResult(emptyList(), false)
+                }
+                when {
+                    multiResult.orders.isNotEmpty() -> multiResult.orders
+                    singleResult.code != null -> listOf(singleResult)
+                    else -> listOf(singleResult)
+                }
+            }
+            val engineSummary = engineResult?.let {
+                EngineRecognitionSummary(
+                    pageType = it.pageType,
+                    brand = it.brand?.name,
+                    keywordHitCount = it.keywordHits.size,
+                    cropCount = it.crops.size,
+                    codeCount = it.codes.size,
+                    codes = it.codes.map { c -> c.code },
+                    totalMs = it.totalMs,
                 )
-            } else {
-                MultiRecognitionResult(emptyList(), false)
             }
-            val orders = when {
-                multiResult.hasMultipleCodes && multiResult.orders.size > 1 -> multiResult.orders
-                singleResult.code != null -> listOf(singleResult)
-                multiResult.orders.isNotEmpty() -> multiResult.orders
-                else -> emptyList()
-            }
-            val diagnosticData = if (OcrDiagnosticsPreferences.shouldCapture(appContext)) {
-                ocrResult.diagnosticResult?.let(OcrDiagnosticSnapshotCodec::encode)
-            } else {
-                null
-            }
+            // 引擎摘要总是保存（诊断可见提取了哪些码）；OCR 明细仍受「识别详情」开关控制
+            val diagnosticData = OcrDiagnosticSnapshotCodec.encodeWithEngine(
+                ocr = if (OcrDiagnosticsPreferences.shouldCapture(appContext)) ocrResult.diagnosticResult else null,
+                engine = engineSummary,
+            )
             OfflineImageRecognition(orders, diagnosticData)
         } finally {
             helper.close()
+            if (recognitionBitmap !== bitmap && !recognitionBitmap.isRecycled) {
+                recognitionBitmap.recycle()
+            }
         }
     }
 
-    private suspend fun offlineRecognizeText(text: String): List<RecognitionResult> {
+    private fun cropForOfflineRecognition(bitmap: Bitmap, trigger: RecognitionTrigger): Bitmap {
+        // 分享/导入的图片不一定是完整系统截图，顶部和底部都可能紧贴有效内容。
+        // 旧逻辑固定裁掉顶部 150px，并且只保留 81% 高度，会直接丢失列表首尾项目。
+        // 离线识别仍保留水平方向的轻量裁剪，用于排除截图两侧黑边，但不再裁掉纵向内容。
+        val sideRatio = when (trigger) {
+            RecognitionTrigger.IMPORTED_IMAGE -> 0.02f
+            RecognitionTrigger.SHARED_IMAGE -> 0.02f
+            RecognitionTrigger.SCREEN_CAPTURE -> 0.04f
+            else -> 0f
+        }
+        val sideMargin = (bitmap.width * sideRatio).toInt()
+        val targetWidth = bitmap.width - sideMargin * 2
+        return if (sideMargin > 0 && targetWidth > 0 && targetWidth < bitmap.width) {
+            Bitmap.createBitmap(bitmap, sideMargin, 0, targetWidth, bitmap.height)
+        } else {
+            bitmap
+        }
+    }
+
+    private suspend fun offlineRecognizeText(text: String, source: RecognitionTextSource): List<RecognitionResult> {
         if (!RecognitionRuleEngine.isInitialized) {
             RecognitionRuleEngine.initialize(appContext)
         }
         val helper = TextRecognitionHelper(appContext)
         return try {
-            helper.recognizeFromText(text)
+            helper.recognizeFromText(text, when (source) {
+                RecognitionTextSource.Sms -> com.Badnng.moe.rules.SimpleRuleSource.SMS
+                RecognitionTextSource.Notification -> com.Badnng.moe.rules.SimpleRuleSource.NOTIFICATION
+                RecognitionTextSource.General -> com.Badnng.moe.rules.SimpleRuleSource.TEXT
+            })
         } finally {
             helper.close()
         }
@@ -323,6 +387,9 @@ class RecognitionRouter(context: Context) {
         }.orEmpty()
 
     private suspend fun findBarcodeBrand(value: String): BarcodeBrandMatch? {
+        if (LuckinQrRule.matches(value)) {
+            return BarcodeBrandMatch(LuckinQrRule.BRAND_NAME, LuckinQrRule.CATEGORY)
+        }
         if (!RecognitionRuleEngine.isInitialized) {
             RecognitionRuleEngine.initialize(appContext)
         }

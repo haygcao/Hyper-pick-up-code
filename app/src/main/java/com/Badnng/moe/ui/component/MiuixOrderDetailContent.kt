@@ -74,7 +74,8 @@ fun MiuixOrderDetailContent(
     LazyColumn(
         modifier = modifier.fillMaxSize(),
         contentPadding = androidx.compose.foundation.layout.PaddingValues(
-            top = 12.dp,
+            // 顶栏高度走 contentPadding：列表视口仍是整屏，内容能滑进顶栏下面被 ProgressiveBlur 采样。
+            top = 12.dp + state.topSpacing,
             bottom = state.bottomSpacing,
         ),
         verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -112,7 +113,7 @@ fun MiuixOrderDetailContent(
         }
         item {
             MiuixDetailSection("识别结果") {
-                MiuixDetailRow("取件位置", order.pickupLocation ?: UNRECORDED_VALUE)
+                MiuixDetailRow("取件位置", displayablePickupLocation(order.pickupLocation) ?: UNRECORDED_VALUE)
                 MiuixDetailRow("来源应用", order.sourceApp ?: UNRECORDED_VALUE)
                 MiuixDetailRow("来源包名", order.sourcePackage ?: UNRECORDED_VALUE)
                 MiuixDetailRow("触发方式", recognitionTriggerLabel(order))

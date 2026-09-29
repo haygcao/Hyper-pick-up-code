@@ -1,14 +1,19 @@
 package com.Badnng.moe.ui.screen.miuix
 
+import android.app.Application
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.PredictiveBackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.foundation.layout.requiredWidth
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.animation.core.EaseInOut
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.animateFloatAsState
@@ -70,18 +75,21 @@ import top.yukonga.miuix.kmp.icon.extended.Info
 import top.yukonga.miuix.kmp.icon.extended.Settings
 import top.yukonga.miuix.kmp.icon.extended.UploadCloud
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.key
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.SideEffect
-import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.SaveableStateHolder
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.Modifier
@@ -95,21 +103,14 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.navigation3.runtime.NavKey
-import androidx.navigation3.runtime.NavEntry
-import androidx.navigation3.runtime.entryProvider
-import androidx.navigation3.runtime.rememberDecoratedNavEntries
-import androidx.navigation3.runtime.rememberNavBackStack
-import androidx.navigation3.runtime.rememberSaveableStateHolderNavEntryDecorator
-import androidx.navigation3.scene.Scene
-import androidx.navigation3.scene.SceneStrategy
-import androidx.navigation3.scene.SceneStrategyScope
-import androidx.navigation3.ui.NavDisplay
-import androidx.navigation3.ui.NavDisplayTransitionEffects
-import androidx.navigation3.ui.defaultPopTransitionSpec
-import androidx.navigation3.ui.defaultPredictivePopTransitionSpec
-import androidx.navigation3.ui.defaultTransitionSpec
+import top.yukonga.miuix.kmp.nav.core.NavDisplay
+import top.yukonga.miuix.kmp.nav.core.NavDisplayEffects
+import top.yukonga.miuix.kmp.nav.core.NavKey
+import top.yukonga.miuix.kmp.nav.core.rememberNavBackStack
+import top.yukonga.miuix.kmp.nav.transition.NavTransitions
+import top.yukonga.miuix.kmp.nav.transition.navDirectionalTransition
 import com.Badnng.moe.data.db.OrderEntity
 import com.Badnng.moe.data.db.OrderGroup
 import com.Badnng.moe.data.db.OrderDatabase
@@ -121,6 +122,9 @@ import com.Badnng.moe.ui.miuix.liquid.IosLiquidGlassNavigationBar
 import com.Badnng.moe.ui.screen.rememberSaveablePagerState
 import com.Badnng.moe.ui.screen.settings.AboutSettingsContent
 import com.Badnng.moe.ui.screen.settings.SettingsPage
+import com.Badnng.moe.rules.SimpleRuleCategory
+import com.Badnng.moe.rules.WordType
+import com.Badnng.moe.ui.component.SimpleRuleCenterPage
 import com.Badnng.moe.viewmodel.OrderViewModel
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.cancelAndJoin
@@ -133,7 +137,6 @@ import kotlinx.serialization.modules.SerializersModule
 import kotlinx.serialization.modules.polymorphic
 import kotlinx.serialization.modules.subclass
 import kotlin.math.roundToInt
-import androidx.savedstate.serialization.SavedStateConfiguration
 import androidx.window.layout.FoldingFeature
 import androidx.window.layout.WindowInfoTracker
 import top.yukonga.miuix.kmp.basic.FloatingNavigationBar
@@ -157,6 +160,7 @@ import top.yukonga.miuix.kmp.basic.rememberNavigationRailState
 import top.yukonga.miuix.kmp.anim.folmeSpring
 import top.yukonga.miuix.kmp.blur.BlendColorEntry
 import top.yukonga.miuix.kmp.blur.BlurDefaults
+import top.yukonga.miuix.kmp.blur.LayerBackdrop
 import top.yukonga.miuix.kmp.blur.layerBackdrop
 import top.yukonga.miuix.kmp.blur.textureBlur
 import top.yukonga.miuix.kmp.blur.highlight.Highlight
@@ -166,6 +170,19 @@ import top.yukonga.miuix.kmp.basic.FloatingToolbarDefaults
 
 // 顶层路由
 @Serializable
+enum class RuleSubPageKind {
+    Category,
+    CreateBrand,
+    Brand,
+    CreateTemplate,
+    Template,
+    WordCategory,
+    BlockedWords,
+    CustomLocations,
+    CustomIcons,
+}
+
+@Serializable
 sealed interface HomeRoute : NavKey {
     @Serializable
     data object Main : HomeRoute
@@ -174,10 +191,62 @@ sealed interface HomeRoute : NavKey {
     data class SettingsSubPage(val page: SettingsPage) : HomeRoute
 
     @Serializable
+    data class RuleSubPage(
+        val kind: RuleSubPageKind,
+        val category: String = "",
+        val brandId: String = "",
+        val templateId: String = "",
+    ) : HomeRoute
+
+    @Serializable
     data class OrderDetail(val orderId: String) : HomeRoute
 
     @Serializable
     data class GroupDetail(val groupId: Long) : HomeRoute
+}
+
+private fun SimpleRuleCenterPage.toHomeRoute(): HomeRoute.RuleSubPage = when (this) {
+    SimpleRuleCenterPage.Root -> error("规则主页不能作为二级路由")
+    is SimpleRuleCenterPage.WordCategory -> HomeRoute.RuleSubPage(
+        kind = RuleSubPageKind.WordCategory,
+        category = type.name,
+    )
+    is SimpleRuleCenterPage.Category -> HomeRoute.RuleSubPage(
+        kind = RuleSubPageKind.Category,
+        category = category.name,
+    )
+    is SimpleRuleCenterPage.CreateBrand -> HomeRoute.RuleSubPage(
+        kind = RuleSubPageKind.CreateBrand,
+        category = category.name,
+    )
+    is SimpleRuleCenterPage.Brand -> HomeRoute.RuleSubPage(
+        kind = RuleSubPageKind.Brand,
+        brandId = brandId,
+    )
+    is SimpleRuleCenterPage.CreateTemplate -> HomeRoute.RuleSubPage(
+        kind = RuleSubPageKind.CreateTemplate,
+        brandId = brandId,
+    )
+    is SimpleRuleCenterPage.Template -> HomeRoute.RuleSubPage(
+        kind = RuleSubPageKind.Template,
+        brandId = brandId,
+        templateId = templateId,
+    )
+    SimpleRuleCenterPage.BlockedWords -> HomeRoute.RuleSubPage(kind = RuleSubPageKind.BlockedWords)
+    SimpleRuleCenterPage.CustomLocations -> HomeRoute.RuleSubPage(kind = RuleSubPageKind.CustomLocations)
+    SimpleRuleCenterPage.CustomIcons -> HomeRoute.RuleSubPage(kind = RuleSubPageKind.CustomIcons)
+}
+
+private fun HomeRoute.RuleSubPage.toRulePage(): SimpleRuleCenterPage = when (kind) {
+    RuleSubPageKind.Category -> SimpleRuleCenterPage.Category(SimpleRuleCategory.valueOf(category))
+    RuleSubPageKind.CreateBrand -> SimpleRuleCenterPage.CreateBrand(SimpleRuleCategory.valueOf(category))
+    RuleSubPageKind.Brand -> SimpleRuleCenterPage.Brand(brandId)
+    RuleSubPageKind.CreateTemplate -> SimpleRuleCenterPage.CreateTemplate(brandId)
+    RuleSubPageKind.Template -> SimpleRuleCenterPage.Template(brandId, templateId)
+    RuleSubPageKind.WordCategory -> SimpleRuleCenterPage.WordCategory(WordType.valueOf(category))
+    RuleSubPageKind.BlockedWords -> SimpleRuleCenterPage.BlockedWords
+    RuleSubPageKind.CustomLocations -> SimpleRuleCenterPage.CustomLocations
+    RuleSubPageKind.CustomIcons -> SimpleRuleCenterPage.CustomIcons
 }
 
 @Composable
@@ -189,7 +258,7 @@ fun MiuixHomeScreen(
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences("settings", Context.MODE_PRIVATE) }
     val configuration = LocalConfiguration.current
-    val isLargeScreenWindow = configuration.screenWidthDp >= MIUIX_LARGE_SCREEN_MIN_WIDTH_DP
+    val isPortrait = configuration.screenHeightDp > configuration.screenWidthDp
     val windowInfoTracker = remember(context) { WindowInfoTracker.getOrCreate(context) }
     val windowLayoutInfo = remember(windowInfoTracker, context) {
         windowInfoTracker.windowLayoutInfo(context)
@@ -200,6 +269,10 @@ fun MiuixHomeScreen(
         ?.filterIsInstance<FoldingFeature>()
         ?.firstOrNull()
     val isFolded = foldingFeature?.state == FoldingFeature.State.HALF_OPENED
+    // 折叠屏展开后即使竖屏也按大屏处理；普通平板竖屏仍走手机逻辑。
+    val isFoldableExpanded = foldingFeature != null && !isFolded
+    val isLargeScreenWindow = configuration.screenWidthDp >= MIUIX_LARGE_SCREEN_MIN_WIDTH_DP &&
+        (!isPortrait || isFoldableExpanded)
     var hapticEnabled by remember { mutableStateOf(prefs.getBoolean("haptic_enabled", true)) }
     // 大屏切换会改变 NavigationRail/NavDisplay 场景，只在下次主页加载时生效；
     // 手机端仅切换底栏样式，可以直接响应偏好变化。
@@ -246,12 +319,13 @@ fun MiuixHomeScreen(
         onDispose { prefs.unregisterOnSharedPreferenceChangeListener(listener) }
     }
 
+    // 平板竖屏使用底栏；横屏大屏才使用侧边导航栏。
     val supportsNavigationRail =
         isLargeScreenWindow && !useFloatingNavBar
     val compactNavigationRail = supportsNavigationRail &&
         configuration.screenWidthDp < MIUIX_FIXED_NAVIGATION_RAIL_MIN_WIDTH_DP
-    // 二级页在所有大屏侧栏模式下都与主内容并排。固定侧栏占一列形成三段式；
-    // 紧凑窗口的侧栏覆盖在主内容上，不占列宽，因此底层保持主内容/二级页两段式。
+    // 大屏横屏侧栏模式下恢复主内容 + 二级页并排：固定侧栏展开时为三段式，
+    // 折叠时为两段式；小屏/平板竖屏/悬浮底栏仍由 NavDisplay 全屏呈现。
     val supportsSupportingPane = supportsNavigationRail
     val navigationRailState = rememberNavigationRailState(
         initialValue = if (compactNavigationRail) {
@@ -268,28 +342,90 @@ fun MiuixHomeScreen(
         }
     }
 
-    val serializersModule = remember {
-        SerializersModule {
-            polymorphic(NavKey::class) {
-                subclass(HomeRoute.Main::class)
-                subclass(HomeRoute.SettingsSubPage::class)
-                subclass(HomeRoute.OrderDetail::class)
-                subclass(HomeRoute.GroupDetail::class)
+    val backStack = rememberNavBackStack<HomeRoute>(HomeRoute.Main)
+    // 主页卡片 → 识别详情的一镜到底转场；只在小屏（非三段式）模式下接入。
+    val cardMorph = rememberCardMorphController()
+    // 订单组卡片的展开态提升到这里：列表里的卡片与叠加层里的镜像卡片必须读同一份，
+    // 否则叠加层那份会画出收起态卡片（它的 rememberSaveable 是实例私有的），
+    // 转场期间露出「只剩几行」的假卡片。见 LocalCardMorphExpandedGroups 的注释。
+    val expandedGroupIds = remember { mutableStateOf(setOf<Long>()) }
+    // 只能出栈「真正的详情入口」：铺开途中详情还没入栈，返回键此时也会走到收回逻辑，
+    // 不加这个判断就会把主页入口本身弹掉（栈空 → 整屏空白）。
+    // 订单与订单组两条一镜到底链路都可能停在栈顶，两者都要能出栈。
+    cardMorph.onRequestPop = {
+        val top = backStack.lastOrNull()
+        if (top is HomeRoute.OrderDetail || top is HomeRoute.GroupDetail) backStack.removeLastOrNull()
+    }
+    // 铺开动画结束才入栈；入栈与叠加层退场同帧完成。按 key 前缀决定入哪条详情：
+    // `order:` → 识别详情，`group:` → 订单组详情。
+    // 加一层防重：同一路由入栈两次会让 NavDisplay 抛 Duplicate contentKey 直接杀进程。
+    cardMorph.onRequestPush = { key ->
+        when {
+            key.startsWith(GroupMorphKeyPrefix) -> {
+                val groupId = key.removePrefix(GroupMorphKeyPrefix).toLongOrNull()
+                if (groupId != null && backStack.lastOrNull() !is HomeRoute.GroupDetail) {
+                    backStack.add(HomeRoute.GroupDetail(groupId))
+                }
+            }
+            else -> {
+                val orderId = key.removePrefix(OrderMorphKeyPrefix)
+                if (backStack.lastOrNull() !is HomeRoute.OrderDetail) {
+                    backStack.add(HomeRoute.OrderDetail(orderId))
+                }
             }
         }
     }
-    val savedStateConfig = remember(serializersModule) {
-        SavedStateConfiguration {
-            this.serializersModule = serializersModule
-        }
-    }
-    val backStack = rememberNavBackStack(
-        configuration = savedStateConfig,
-        HomeRoute.Main,
-    )
     val closeDetailPane = {
         while (backStack.size > 1) backStack.removeLastOrNull()
     }
+    // 大屏双栏是「主内容 + 详情面板」：面板已经显示这条订单时再入栈毫无收益——
+    // 栈里会堆同一 id 的 OrderDetail，而面板内容按 route 复用、画面毫无变化（看着像点击没反应），
+    // 关闭却要按同样多次返回键，多按一次直接把应用退出到桌面。
+    // 因此：同一条订单 → 不动；换成另一条 → 替换栈顶（与规则子页的 onReplace 一致）。
+    // 所有详情入口（主页卡片、面板内详情、作品组详情里的子订单）都必须走这里。
+    val pushOrderDetail: (String) -> Unit = { orderId ->
+        val top = backStack.lastOrNull()
+        when {
+            top is HomeRoute.OrderDetail && top.orderId == orderId -> Unit
+            top is HomeRoute.OrderDetail -> {
+                backStack.removeLastOrNull()
+                backStack.add(HomeRoute.OrderDetail(orderId))
+            }
+            else -> backStack.add(HomeRoute.OrderDetail(orderId))
+        }
+    }
+    // supportsSupportingPane 必须进 remember 的 key：折叠屏/大屏在启动瞬间可能先按竖屏（小屏）
+    // 上报一次窗口尺寸，只用 cardMorph 做 key 会把「非空 source」永久冻结——之后即使已经在两栏
+    // 布局里，卡片点击仍然走一镜到底分支；而两栏没有叠加层给会话收尾，会话永久驻留，
+    // beginExpand 命中残留会话直接 return，表现就是「进过一次之后再也点不进去」。
+    val cardMorphSource = remember(cardMorph, supportsSupportingPane) {
+        if (supportsSupportingPane) null else CardMorphSource(cardMorph::registerCard, cardMorph::unregisterCard)
+    }
+    // 从手机布局切进大屏双栏时清掉残留会话（双栏没有叠加层，没人收尾）。
+    LaunchedEffect(supportsSupportingPane) {
+        if (supportsSupportingPane) cardMorph.abandonSessions()
+    }
+    // 打开识别详情：手机只发起转场，入栈由控制器在铺开结束时回调（onRequestPush）；
+    // 三段式大屏 / 卡片没登记时直接入栈，行为与之前一致。
+    // 分支必须按**当前**布局判定，不能只看 cardMorphSource 这个被 remember 固化的对象：
+    // 两栏布局下卡片一律直接入栈，绝不走一镜到底（那条路径在双栏没有叠加层）。
+    // 主页订单卡片与订单组详情里的子订单卡片共用这一条。
+    val openOrderDetail: (String) -> Unit = { orderId ->
+        val key = orderMorphKey(orderId)
+        if (!supportsSupportingPane && cardMorphSource != null && cardMorph.canMorph(key)) {
+            cardMorph.beginExpand(key)
+        } else {
+            pushOrderDetail(orderId)
+        }
+    }
+    // 主页模态层（BottomSheet / 长按菜单 / 卡片一镜到底）共用的背景采样层。
+    // 必须与底栏自身使用的 backdrop 分开，避免 layerBackdrop / textureBlur 递归；
+    // 由这里创建是为了让一镜到底叠加层能挂在 NavDisplay 之外——放进导航入口会被
+    // NavDisplayEffects.dimAmount 整层压暗（详情入口此时是空实现，结果就是灰屏）。
+    val homeOverlayBackdrop = com.Badnng.moe.ui.miuix.rememberMiuixBackdrop()
+    // 卡片一镜到底专用的背景采样层：录制必须从主页出现的第一帧就常驻挂在内容区上，
+    // 否则转场第一帧才挂上去时 backdrop 里还没有内容，模糊会一直画不出东西（只剩压暗）。
+    val cardMorphBackdrop = com.Badnng.moe.ui.miuix.rememberMiuixBackdrop()
     // EntryProvider 必须跨窗口尺寸变化保持同一实例；第三段仍在退场时重建入口，
     // 会让 SaveableStateHolder 同时注册两个相同的二级页 key。
     val latestUseFloatingNavBar by rememberUpdatedState(useFloatingNavBar)
@@ -303,180 +439,500 @@ fun MiuixHomeScreen(
     val latestPagerState by rememberUpdatedState(pagerState)
     val latestIsFolded by rememberUpdatedState(isFolded)
 
-    val homeEntryProvider = remember(
-        backStack,
-        navigationRailState,
+    val mainContent: @Composable () -> Unit = {
+        MiuixMainContent(
+            modifier = if (supportsSupportingPane) Modifier.fillMaxSize() else latestModifier,
+            intentToProcess = latestIntentToProcess,
+            hapticEnabled = latestHapticEnabled,
+            useFloatingNavBar = latestUseFloatingNavBar,
+            floatingNavBarStyle = latestFloatingNavBarStyle,
+            navAlignment = latestNavAlignment,
+            allowAppExit = backStack.size == 1,
+            navigationRailState = navigationRailState,
+            compactNavigationRail = latestCompactNavigationRail,
+            externalPagerState = latestPagerState,
+            isFolded = latestIsFolded,
+            forceLargeScreen = isFoldableExpanded,
+            cardMorph = cardMorph,
+            expandedGroupIds = expandedGroupIds,
+            cardMorphOrderId = (backStack.lastOrNull() as? HomeRoute.OrderDetail)?.orderId,
+            homeOverlayBackdrop = homeOverlayBackdrop,
+            cardMorphBackdrop = cardMorphBackdrop,
+            onTopLevelPageChanged = {
+                // 主内容/二级页并排时只更新主内容，二级页保持原位。
+                // 一镜到底进行中时叠加层正在绘制详情，此刻清栈会把它的订单 id 一起清掉（表现为空白页），
+                // 因此转场期间不动返回栈，等转场收完再按正常路径处理。
+                if (!latestSupportsSupportingPane && !cardMorph.overlayVisible) closeDetailPane()
+            },
+            onNavigateToSettingsSubPage = { page ->
+                backStack.add(HomeRoute.SettingsSubPage(page))
+            },
+            onNavigateToRuleSubPage = { page ->
+                backStack.add(page.toHomeRoute())
+            },
+            onNavigateToOrderDetail = openOrderDetail,
+            onNavigateToGroupDetail = { groupId ->
+                // 与订单详情同构：手机走一镜到底（订单组卡片 → 订单组详情），
+                // 三段式大屏/未登记该卡片时按原来的方式直接入栈。
+                val key = groupMorphKey(groupId)
+                if (!supportsSupportingPane && cardMorphSource != null && cardMorph.canMorph(key)) {
+                    cardMorph.beginExpand(key)
+                } else {
+                    backStack.add(HomeRoute.GroupDetail(groupId))
+                }
+            },
+        )
+    }
+
+    // 一镜到底的登记入口（LocalCardMorphSource）提到 NavDisplay 与叠加层之外：
+    // 组详情页既可能由 NavDisplay 入口绘制、也可能正由叠加层绘制，两处的子订单卡片都要能登记几何；
+    // 只包在 mainContent 里的话，详情页拿到的就是 null（子卡片点不出动画）。
+    // supportsSupportingPane 为 true 时 cardMorphSource 本身就是 null，语义与之前完全一致（大屏不做一镜到底）。
+    CompositionLocalProvider(
+        LocalCardMorphSource provides cardMorphSource,
+        LocalCardMorphActiveKeys provides cardMorph.sessions.mapTo(mutableSetOf()) { it.key },
     ) {
-        entryProvider<NavKey> {
-            entry<HomeRoute.Main>(
-                metadata = mapOf(MIUIX_PANE_ROLE_METADATA to MiuixHomePaneRole.Main),
-            ) {
-                MiuixMainContent(
-                    modifier = latestModifier,
-                    intentToProcess = latestIntentToProcess,
-                    hapticEnabled = latestHapticEnabled,
-                    useFloatingNavBar = latestUseFloatingNavBar,
-                    floatingNavBarStyle = latestFloatingNavBarStyle,
-                    navAlignment = latestNavAlignment,
-                    allowAppExit = backStack.size == 1,
-                    navigationRailState = navigationRailState,
-                    compactNavigationRail = latestCompactNavigationRail,
-                    externalPagerState = latestPagerState,
-                    isFolded = latestIsFolded,
-                    onTopLevelPageChanged = {
-                        // 主内容/二级页并排时只更新主内容，二级页保持原位。
-                        if (!latestSupportsSupportingPane) closeDetailPane()
-                    },
+    if (supportsSupportingPane) {
+        val detailTarget = backStack.lastOrNull()
+            ?.takeIf { it != HomeRoute.Main }
+            ?.let { MiuixHomeDetailTarget(route = it as HomeRoute, depth = backStack.size - 1) }
+        MiuixSupportingPaneLayout(
+            modifier = latestModifier,
+            detailTarget = detailTarget,
+            detailContent = { target ->
+                MiuixHomeDetailContent(
+                    target = target,
+                    supportingPane = true,
+                    onBack = { backStack.removeLastOrNull() },
                     onNavigateToSettingsSubPage = { page ->
                         backStack.add(HomeRoute.SettingsSubPage(page))
                     },
-                    onNavigateToOrderDetail = { orderId ->
-                        backStack.add(HomeRoute.OrderDetail(orderId))
+                    onNavigateToRuleSubPage = { page ->
+                        backStack.add(page.toHomeRoute())
                     },
-                    onNavigateToGroupDetail = { groupId ->
-                        backStack.add(HomeRoute.GroupDetail(groupId))
-                    }
+                    onReplaceRuleSubPage = { page ->
+                        backStack.removeLastOrNull()
+                        backStack.add(page.toHomeRoute())
+                    },
+                    onOpenOrderDetail = { orderId ->
+                        pushOrderDetail(orderId)
+                    },
+                )
+            },
+            mainContent = mainContent,
+        )
+        if (predictiveBackEnabled) {
+            PredictiveBackHandler(enabled = backStack.size > 1) {
+                try {
+                    it.collect { }
+                    backStack.removeLastOrNull()
+                } catch (_: kotlinx.coroutines.CancellationException) {
+                    // 手势取消，保持当前页面
+                }
+            }
+        } else {
+            BackHandler(enabled = backStack.size > 1) {
+                backStack.removeLastOrNull()
+            }
+        }
+    } else {
+        Box(modifier = Modifier.fillMaxSize()) {
+        NavDisplay(
+            backStack = backStack,
+            onBack = {
+                // 一镜到底进行中时返回由叠加层负责（先收回卡片再出栈）。
+                if (!cardMorph.overlayVisible && backStack.size > 1) backStack.removeLastOrNull()
+            },
+            transition = if (predictiveBackEnabled) {
+                NavTransitions.MiuixDefault
+            } else {
+                navDirectionalTransition(
+                    push = NavTransitions.MiuixDefault,
+                    pop = NavTransitions.MiuixDefault,
+                    predictivePop = NavTransitions.None,
+                )
+            },
+            effects = NavDisplayEffects(
+                enableCornerClip = true,
+                // 一镜到底进行中，栈顶详情入口是空实现，底层主页不该被导航层再压暗一次：
+                // 转场自己画的遮罩随进度淡入，双重压暗会让起始帧明显偏灰。
+                dimAmount = if (cardMorph.overlayVisible) 0f else 0.5f,
+                blockInputDuringTransition = false,
+            ),
+        ) {
+            entry<HomeRoute.Main> {
+                mainContent()
+            }
+            entry<HomeRoute.RuleSubPage> { route ->
+                com.Badnng.moe.ui.screen.miuix.MiuixRuleSubPageScreen(
+                    page = route.toRulePage(),
+                    supportingPane = latestSupportsSupportingPane,
+                    onBack = { backStack.removeLastOrNull() },
+                    onNavigate = { page -> backStack.add(page.toHomeRoute()) },
+                    onReplace = { page ->
+                        backStack.removeLastOrNull()
+                        backStack.add(page.toHomeRoute())
+                    },
                 )
             }
-            entry<HomeRoute.SettingsSubPage>(
-                metadata = mapOf(MIUIX_PANE_ROLE_METADATA to MiuixHomePaneRole.Detail),
-            ) { route ->
+            entry<HomeRoute.SettingsSubPage> { route ->
                 MiuixSettingsSubPageDirect(
                     page = route.page,
                     supportingPane = latestSupportsSupportingPane,
                     onBack = { backStack.removeLastOrNull() },
                     onNavigate = { page ->
                         backStack.add(HomeRoute.SettingsSubPage(page))
-                    }
+                    },
                 )
             }
             entry<HomeRoute.OrderDetail>(
-                metadata = mapOf(MIUIX_PANE_ROLE_METADATA to MiuixHomePaneRole.Detail),
+                transition = NavTransitions.None,
             ) { route ->
-                val context = LocalContext.current
-                val order = remember(route.orderId) {
-                    runBlocking { OrderDatabase.getDatabase(context).orderDao().getOrderById(route.orderId) }
-                }
-                if (order != null) {
-                    com.Badnng.moe.ui.screen.miuix.MiuixOrderDetailScreen(
-                        order = order,
+                // 卡片叠加层独占绘制时，底层入口留空，避免同一页绘制两份。
+                // 还必须要求「这条路由仍是栈顶」：详情出栈发生在收回动画开始时（叠加层正盖满整屏），
+                // 而 NavDisplay 会把退场中的入口再留几帧——叠加层撤掉的那一帧正好是这几帧之一，
+                // 只判断 overlayVisible 就会让这一帧画出整页详情（偶现「闪一下识别详情」）。
+                if (!cardMorph.overlayVisible && backStack.lastOrNull() == route) {
+                    MiuixOrderDetailContent(
+                        orderId = route.orderId,
                         supportingPane = latestSupportsSupportingPane,
-                        onBack = { backStack.removeLastOrNull() }
+                        // 这一页可能是「一镜到底」铺开后的落点：返回按钮也走收回动画。
+                        onBack = {
+                            if (cardMorphSource != null && cardMorph.canMorph(orderMorphKey(route.orderId))) {
+                                cardMorph.beginCollapse()
+                            } else {
+                                backStack.removeLastOrNull()
+                            }
+                        },
                     )
                 }
             }
             entry<HomeRoute.GroupDetail>(
-                metadata = mapOf(MIUIX_PANE_ROLE_METADATA to MiuixHomePaneRole.Detail),
+                // 必须与 OrderDetail 入口一致地关掉导航层自己的转场：
+                // 一镜到底期间叠加层独占绘制（下面那个 if 恒为假），这条路线的任何转场都只会
+                // 出现在「收回动画开始时把手势中途出栈」和「动画收完叠加层撤场」这两帧上——
+                // 结果是同一个返回手势被导航层与一镜到底两套驱动同时消费：导航层开始播 pop 转场，
+                // 系统判定手势失效并 onBackCancelled，我们的 handleOnBackPressed 永远不来，
+                // 表现为「静止态侧滑完全没反应」；取消后又把路由重新入栈，就是「主页从左边往右走」。
+                // 组详情这一层永远由叠加层负责，因此和 OrderDetail 一样给 None。
+                transition = NavTransitions.None,
             ) { route ->
-                val context = LocalContext.current
-                val db = remember { OrderDatabase.getDatabase(context) }
-                val group = remember(route.groupId) {
-                    runBlocking { db.orderGroupDao().getGroupById(route.groupId) }
-                }
-                val orders by db.orderGroupDao()
-                    .getOrdersByGroupId(route.groupId)
-                    .collectAsStateWithLifecycle(initialValue = emptyList())
-                val completedCount = orders.count { it.isCompleted }
-                val totalCount = orders.size
-                if (group != null) {
-                    com.Badnng.moe.ui.screen.miuix.MiuixGroupDetailScreen(
-                        group = group,
-                        orders = orders,
-                        completedCount = completedCount,
-                        totalCount = totalCount,
+                // 与 OrderDetail 入口同一套守卫：
+                // ① 叠加层独占绘制时（组卡片一镜到底铺开中/静止态/收回中）底层入口留空，避免画两份；
+                // ② 还必须是栈顶：出栈发生在收回动画开始时（叠加层正盖满整屏），
+                //    而 NavDisplay 会把退场中的入口再留几帧，只判断 overlayVisible 会闪一下整页。
+                if (!cardMorph.overlayVisible && backStack.lastOrNull() == route) {
+                    MiuixGroupDetailRouteContent(
+                        groupId = route.groupId,
                         supportingPane = latestSupportsSupportingPane,
-                        onBack = { backStack.removeLastOrNull() },
-                        onOpenOrder = { order ->
-                            backStack.add(HomeRoute.OrderDetail(order.id))
-                        },
-                        onMarkOrderCompleted = { order ->
-                            runBlocking {
-                                db.orderDao().markAsCompleted(order.id, System.currentTimeMillis())
+                        // 这一页可能是「一镜到底」铺开后的落点：返回按钮也走收回动画。
+                        onBack = {
+                            if (cardMorphSource != null && cardMorph.canMorph(groupMorphKey(route.groupId))) {
+                                cardMorph.beginCollapse()
+                            } else {
+                                backStack.removeLastOrNull()
                             }
                         },
-                        onMarkAllCompleted = {
-                            runBlocking {
-                                val now = System.currentTimeMillis()
-                                db.orderGroupDao().markGroupAsCompleted(route.groupId, now)
-                                db.orderGroupDao().markAllOrdersInGroupCompleted(route.groupId, now)
-                            }
-                            backStack.removeLastOrNull()
-                        }
+                        onOpenOrder = { order -> openOrderDetail(order.id) },
+                        onMarkAllCompletedDone = { backStack.removeLastOrNull() },
                     )
                 }
             }
         }
+        // 卡片 → 识别详情一镜到底叠加层：NavDisplay 的兄弟节点，且在它之后绘制。
+        // 不能放进 HomeRoute.Main 入口：导航层会按 dimAmount 把非栈顶入口整层压暗，
+        // 而栈顶详情入口在叠加层可见时是空实现，那样整屏只剩压暗层，就是「灰屏」。
+        if (cardMorph.overlayVisible) {
+            // 叠加层那一份：必须一起包。叠加层是 NavDisplay 的兄弟节点，不在 pager 子树里，
+            // 只包列表侧的话，镜像卡片会读到默认空集 → 仍然画收起态 → 本方案失效。
+            CompositionLocalProvider(LocalCardMorphExpandedGroups provides expandedGroupIds.value) {
+            MiuixCardMorphOverlay(
+                controller = cardMorph,
+                backdrop = cardMorphBackdrop,
+                // 起点是卡片底色，终点是详情页底色：容器底色随进度在两者之间过渡。
+                surfaceColor = MiuixTheme.colorScheme.surfaceContainer,
+                destinationColor = MiuixTheme.colorScheme.surface,
+                hapticEnabled = hapticEnabled,
+            ) { session ->
+                val key = session.key
+                // key 来自会话自己：并行动画时同时有两条会话，各画各的详情页。
+                // 前缀决定画哪一页：`order:` → 识别详情，`group:` → 订单组详情。
+                if (key.startsWith(GroupMorphKeyPrefix)) {
+                    key.removePrefix(GroupMorphKeyPrefix).toLongOrNull()?.let { groupId ->
+                        MiuixGroupDetailRouteContent(
+                            groupId = groupId,
+                            initialGroup = session.payload as? OrderGroup,
+                            supportingPane = false,
+                            onBack = { cardMorph.beginCollapse() },
+                            // 组详情里的子订单卡片：能一镜到底就再开一条会话（叠在组详情上，
+                            // 引擎按「并行动画」处理），否则按原来的方式入栈。
+                            onOpenOrder = { order -> openOrderDetail(order.id) },
+                            onMarkAllCompletedDone = { cardMorph.beginCollapse() },
+                        )
+                    }
+                } else {
+                    MiuixOrderDetailContent(
+                        orderId = key.removePrefix(OrderMorphKeyPrefix),
+                        initialOrder = session.payload as? OrderEntity,
+                        supportingPane = false,
+                        onBack = { cardMorph.beginCollapse() },
+                    )
+                }
+            }
+            } // ← 新增：闭合 A2 的 LocalCardMorphExpandedGroups（叠加层侧）
+        }
+        // 一镜到底期间由卡片叠加层接管返回手势。
+        // 必须放在 NavDisplay 之后：返回回调按注册顺序定优先级，NavDisplay 自己也会注册一个，
+        // 放在它前面就会被它抢走，手势事件永远到不了这里的 dragProgress。
+        // registrationKey 带上栈深：详情出栈/入栈后重新挂载我们的返回回调，
+        // 保证它始终排在 NavDisplay 自己注册的那个之后（系统按后注册者优先派发）。
+        MiuixCardMorphDismissBackHandler(
+            controller = cardMorph,
+            // 只有「一镜到底正在占用当前屏幕」时才由它接管返回：
+            // · 详情静止态 / 收回动画中：栈顶就是 OrderDetail 或 GroupDetail；
+            // · 铺开动画中（详情还没入栈）：栈顶是 Main 但叠加层已经在跑。
+            // 不能写成 backStack.size > 1：那样普通二级页（规则 / 设置…）也会被它接管，
+            // 而它没有会话时只会弹详情，于是手势被吞掉、页面纹丝不动（只能点返回箭头）。
+            enabled = cardMorph.overlayVisible &&
+                (backStack.lastOrNull() == HomeRoute.Main ||
+                    backStack.lastOrNull() is HomeRoute.OrderDetail ||
+                    backStack.lastOrNull() is HomeRoute.GroupDetail),
+            predictiveBackEnabled = predictiveBackEnabled,
+            morphAvailable = cardMorphSource != null,
+            registrationKey = backStack.size,
+        )
+        } // Box：NavDisplay + 卡片转场叠加层
     }
+    } // CompositionLocalProvider(LocalCardMorphSource)
+}
 
-    val entries = rememberDecoratedNavEntries(
-        backStack = backStack,
-        entryDecorators = listOf(rememberSaveableStateHolderNavEntryDecorator()),
-        entryProvider = homeEntryProvider,
-    )
-    val displayedEntries = if (predictiveBackEnabled || supportsNavigationRail) {
-        entries
-    } else {
-        entries.takeLast(1)
+private data class MiuixHomeDetailTarget(
+    val route: HomeRoute,
+    val depth: Int,
+) {
+    val contentKey: Any get() = route to depth
+}
+
+/** 识别详情内容：三段式并排与手机全屏共用同一份实现。 */
+@Composable
+private fun MiuixOrderDetailContent(
+    orderId: String,
+    initialOrder: OrderEntity? = null,
+    supportingPane: Boolean,
+    onBack: () -> Unit,
+) {
+    val context = LocalContext.current
+    val order = remember(orderId, initialOrder) {
+        initialOrder ?: runBlocking { OrderDatabase.getDatabase(context).orderDao().getOrderById(orderId) }
     }
-    val supportingPaneSceneStrategy = remember(supportsSupportingPane) {
-        MiuixSupportingPaneSceneStrategy(
-            enabled = supportsSupportingPane,
+    if (order != null) {
+        com.Badnng.moe.ui.screen.miuix.MiuixOrderDetailScreen(
+            order = order,
+            supportingPane = supportingPane,
+            onBack = onBack,
         )
     }
-    val navDisplayTransitionEffects = remember {
-        NavDisplayTransitionEffects(
-            enableCornerClip = true,
-            dimAmount = 0.5f,
-            blockInputDuringTransition = false,
-            popDirectionFollowsSwipeEdge = false,
+}
+
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+private fun MiuixSupportingPaneLayout(
+    modifier: Modifier = Modifier,
+    detailTarget: MiuixHomeDetailTarget?,
+    detailContent: @Composable (MiuixHomeDetailTarget) -> Unit,
+    mainContent: @Composable () -> Unit,
+) {
+    BoxWithConstraints(modifier = modifier.fillMaxSize()) {
+        val motionScheme = MaterialTheme.motionScheme
+        val detailPaneWidth = (maxWidth * 0.42f).coerceIn(360.dp, 600.dp)
+        val saveableStateHolder = rememberSaveableStateHolder()
+        var retainedTarget by remember { mutableStateOf(detailTarget) }
+        if (detailTarget != null) {
+            SideEffect { retainedTarget = detailTarget }
+        }
+        val renderedTarget = detailTarget ?: retainedTarget
+        // 面板宽度必须由状态直接决定。之前宽度只由 AnimatedVisibility 的 expand/shrinkHorizontally
+        // 产生：关闭时状态先变 null、尺寸节点还在收缩，这个窗口里状态又变回非 null 时尺寸动画不再重播，
+        // 面板就退化成一个「宽度恒为 0 却仍然 visible」的布局节点——状态是打开、屏幕上一个像素都没有，
+        // 再点卡片也看不出任何变化（用户看到的「第二次进不去」）。
+        // 现在宽度始终朝 detailPaneWidth + 1.dp 收敛，不存在「打开但 0 宽」这一态。
+        val paneOpen = detailTarget != null
+        val paneWidth by animateDpAsState(
+            targetValue = if (paneOpen) detailPaneWidth + 1.dp else 0.dp,
+            animationSpec = motionScheme.defaultSpatialSpec<Dp>(),
+            label = "miuixDetailPaneWidth",
         )
+        Row(modifier = Modifier.fillMaxSize()) {
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxHeight(),
+            ) {
+                mainContent()
+            }
+            // 宽度收完后真正退出组合，避免面板内容长期与 SaveableStateProvider 共存。
+            if (paneWidth > 0.dp) {
+                Row(
+                    modifier = Modifier
+                        .width(paneWidth)
+                        .fillMaxHeight()
+                        .clipToBounds(),
+                ) {
+                    Spacer(
+                        modifier = Modifier
+                            .width(1.dp)
+                            .fillMaxHeight()
+                            .background(MiuixTheme.colorScheme.outline.copy(alpha = 0.35f)),
+                    )
+                    // requiredWidth：面板内容保持满宽、被外层裁切着「露出来」，
+                    // 而不是在展开过程中被外层约束压扁（width() 会被父约束压缩）。
+                    Box(
+                        modifier = Modifier
+                            .requiredWidth(detailPaneWidth)
+                            .fillMaxHeight()
+                            .background(MiuixTheme.colorScheme.surface),
+                    ) {
+                        renderedTarget?.let { target ->
+                            MiuixAnimatedDetailContent(
+                                target = target,
+                                detailContent = detailContent,
+                                saveableStateHolder = saveableStateHolder,
+                            )
+                        }
+                    }
+                }
+            }
+        }
     }
-    val standardTransitionSpec = remember { defaultTransitionSpec<NavKey>() }
-    val standardPopTransitionSpec = remember { defaultPopTransitionSpec<NavKey>() }
-    val standardPredictivePopTransitionSpec = remember {
-        defaultPredictivePopTransitionSpec<NavKey>()
-    }
-    // 始终保留同一个 NavDisplay。若按窗口形态切换两个 NavDisplay，旧场景退场与
-    // 新场景首帧会同时持有 Main/二级页，从而重复注册 SaveableState key。
-    NavDisplay(
-        entries = displayedEntries,
-        onBack = { if (backStack.size > 1) backStack.removeLastOrNull() },
-        sceneStrategies = listOf(supportingPaneSceneStrategy),
+}
+
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+private fun MiuixAnimatedDetailContent(
+    target: MiuixHomeDetailTarget,
+    detailContent: @Composable (MiuixHomeDetailTarget) -> Unit,
+    saveableStateHolder: SaveableStateHolder,
+) {
+    val motionScheme = MaterialTheme.motionScheme
+    AnimatedContent(
+        targetState = target,
+        contentKey = { it.contentKey },
         transitionSpec = {
-            val windowLayoutChanged =
-                initialState is MiuixSupportingPaneScene ||
-                    targetState is MiuixSupportingPaneScene
-            if (supportsSupportingPane || windowLayoutChanged) {
-                EnterTransition.None togetherWith ExitTransition.None
-            } else {
-                standardTransitionSpec.invoke(this)
+            val spatialSpec = motionScheme.defaultSpatialSpec<IntOffset>()
+            val effectsSpec = motionScheme.defaultEffectsSpec<Float>()
+            when {
+                targetState.depth > initialState.depth -> {
+                    (slideInHorizontally(spatialSpec) { it } + fadeIn(effectsSpec)) togetherWith
+                        (slideOutHorizontally(spatialSpec) { -it / 4 } + fadeOut(effectsSpec))
+                }
+                targetState.depth < initialState.depth -> {
+                    (slideInHorizontally(spatialSpec) { -it / 4 } + fadeIn(effectsSpec)) togetherWith
+                        (slideOutHorizontally(spatialSpec) { it } + fadeOut(effectsSpec))
+                }
+                else -> fadeIn(effectsSpec) togetherWith fadeOut(effectsSpec)
             }
         },
-        popTransitionSpec = {
-            val windowLayoutChanged =
-                initialState is MiuixSupportingPaneScene ||
-                    targetState is MiuixSupportingPaneScene
-            if (supportsSupportingPane || windowLayoutChanged) {
-                EnterTransition.None togetherWith ExitTransition.None
-            } else {
-                standardPopTransitionSpec.invoke(this)
-            }
-        },
-        predictivePopTransitionSpec = { progress ->
-            val windowLayoutChanged =
-                initialState is MiuixSupportingPaneScene ||
-                    targetState is MiuixSupportingPaneScene
-            if (supportsSupportingPane || windowLayoutChanged) {
-                EnterTransition.None togetherWith ExitTransition.None
-            } else {
-                standardPredictivePopTransitionSpec.invoke(this, progress)
-            }
-        },
-        transitionEffects = navDisplayTransitionEffects,
-    )
+        label = "miuixDetailNavigation",
+    ) { renderedTarget ->
+        saveableStateHolder.SaveableStateProvider(renderedTarget.contentKey.toString()) {
+            detailContent(renderedTarget)
+        }
+    }
+}
 
-    BackHandler(enabled = !predictiveBackEnabled && backStack.size > 1) {
-        backStack.removeLastOrNull()
+@Composable
+private fun MiuixHomeDetailContent(
+    target: MiuixHomeDetailTarget,
+    supportingPane: Boolean,
+    onBack: () -> Unit,
+    onNavigateToSettingsSubPage: (SettingsPage) -> Unit,
+    onNavigateToRuleSubPage: (SimpleRuleCenterPage) -> Unit,
+    onReplaceRuleSubPage: (SimpleRuleCenterPage) -> Unit,
+    onOpenOrderDetail: (String) -> Unit,
+) {
+    when (val route = target.route) {
+        is HomeRoute.RuleSubPage -> com.Badnng.moe.ui.screen.miuix.MiuixRuleSubPageScreen(
+            page = route.toRulePage(),
+            supportingPane = supportingPane,
+            onBack = onBack,
+            onNavigate = onNavigateToRuleSubPage,
+            onReplace = onReplaceRuleSubPage,
+        )
+        is HomeRoute.SettingsSubPage -> MiuixSettingsSubPageDirect(
+            page = route.page,
+            supportingPane = supportingPane,
+            onBack = onBack,
+            onNavigate = onNavigateToSettingsSubPage,
+        )
+        is HomeRoute.OrderDetail -> {
+            MiuixOrderDetailContent(
+                orderId = route.orderId,
+                supportingPane = supportingPane,
+                onBack = onBack,
+            )
+        }
+        is HomeRoute.GroupDetail -> {
+            MiuixGroupDetailRouteContent(
+                groupId = route.groupId,
+                supportingPane = supportingPane,
+                onBack = onBack,
+                onOpenOrder = { order -> onOpenOrderDetail(order.id) },
+                onMarkAllCompletedDone = onBack,
+            )
+        }
+        HomeRoute.Main -> Unit
+    }
+}
+
+/**
+ * 订单组详情：三段式并排 / NavDisplay 入口 / 一镜到底叠加层三处共用同一份实现。
+ *
+ * 抽出来是为了让「哪一页详情、读哪张表、全部完成后去哪」只有一份：三处各写一遍的话，
+ * 数据读取与回调语义迟早漂移（例如叠加层里漏掉 markAllCompleted 的收尾）。
+ */
+@Composable
+private fun MiuixGroupDetailRouteContent(
+    groupId: Long,
+    initialGroup: OrderGroup? = null,
+    supportingPane: Boolean,
+    onBack: () -> Unit,
+    onOpenOrder: (OrderEntity) -> Unit,
+    /** 「全部完成」之后去哪：并排面板与普通入口是出栈，一镜到底叠加层是收回卡片。 */
+    onMarkAllCompletedDone: () -> Unit,
+) {
+    val context = LocalContext.current
+    val db = remember { OrderDatabase.getDatabase(context) }
+    val group = remember(groupId, initialGroup) {
+        initialGroup ?: runBlocking { db.orderGroupDao().getGroupById(groupId) }
+    }
+    val orders by db.orderGroupDao()
+        .getOrdersByGroupId(groupId)
+        .collectAsStateWithLifecycle(initialValue = emptyList())
+    val completedCount = orders.count { it.isCompleted }
+    val totalCount = orders.size
+    if (group != null) {
+        com.Badnng.moe.ui.screen.miuix.MiuixGroupDetailScreen(
+            group = group,
+            orders = orders,
+            completedCount = completedCount,
+            totalCount = totalCount,
+            supportingPane = supportingPane,
+            onBack = onBack,
+            onOpenOrder = onOpenOrder,
+            onMarkOrderCompleted = { order ->
+                runBlocking {
+                    db.orderDao().markAsCompleted(order.id, System.currentTimeMillis())
+                }
+            },
+            onMarkAllCompleted = {
+                runBlocking {
+                    val now = System.currentTimeMillis()
+                    db.orderGroupDao().markGroupAsCompleted(groupId, now)
+                    db.orderGroupDao().markAllOrdersInGroupCompleted(groupId, now)
+                }
+                onMarkAllCompletedDone()
+            }
+        )
     }
 }
 
@@ -494,8 +950,19 @@ private fun MiuixMainContent(
     compactNavigationRail: Boolean,
     externalPagerState: androidx.compose.foundation.pager.PagerState? = null,
     isFolded: Boolean,
+    forceLargeScreen: Boolean = false,
+    cardMorph: CardMorphController,
+    /** 订单组卡片的展开态：列表侧与叠加层侧必须共用同一份（见 LocalCardMorphExpandedGroups）。 */
+    expandedGroupIds: MutableState<Set<Long>>,
+    /** 栈顶识别详情的订单 ID，供一镜到底叠加层渲染；非详情页为 null。 */
+    cardMorphOrderId: String?,
+    /** 主页模态层共用的背景采样层，由外层创建（叠加层要挂在导航之外）。 */
+    homeOverlayBackdrop: LayerBackdrop?,
+    /** 卡片一镜到底专用的背景采样层；录制常驻挂在内容区上。 */
+    cardMorphBackdrop: LayerBackdrop?,
     onTopLevelPageChanged: (Int) -> Unit = {},
     onNavigateToSettingsSubPage: (SettingsPage) -> Unit,
+    onNavigateToRuleSubPage: (SimpleRuleCenterPage) -> Unit,
     onNavigateToOrderDetail: (String) -> Unit = {},
     onNavigateToGroupDetail: (Long) -> Unit = {}
 ) {
@@ -535,12 +1002,13 @@ private fun MiuixMainContent(
         }
     }
     val haptic = LocalHapticFeedback.current
-    val viewModel: OrderViewModel = viewModel()
-
-    // 大屏自适应底栏
-    var largeScreenNavAdaptiveEnabled by remember {
-        mutableStateOf(prefs.getBoolean("large_screen_nav_adaptive_enabled", true))
+    val orderViewModelFactory = remember(context) {
+        ViewModelProvider.AndroidViewModelFactory.getInstance(
+            context.applicationContext as Application,
+        )
     }
+    val viewModel: OrderViewModel = viewModel(factory = orderViewModelFactory)
+
     var currentNavAlignment by remember { mutableStateOf(navAlignment) }
     DisposableEffect(prefs) {
         val listener = SharedPreferences.OnSharedPreferenceChangeListener { p, key ->
@@ -555,7 +1023,6 @@ private fun MiuixMainContent(
         val listener = SharedPreferences.OnSharedPreferenceChangeListener { p, key ->
             when (key) {
                 "theme_mode" -> themeMode = p.getString(key, "system") ?: "system"
-                "large_screen_nav_adaptive_enabled" -> largeScreenNavAdaptiveEnabled = p.getBoolean(key, true)
             }
         }
         prefs.registerOnSharedPreferenceChangeListener(listener)
@@ -575,8 +1042,10 @@ private fun MiuixMainContent(
     var isQrDialogVisible by remember { mutableStateOf(false) }
 
     val configuration = LocalConfiguration.current
-    val isLargeScreen = configuration.screenWidthDp >= MIUIX_LARGE_SCREEN_MIN_WIDTH_DP
-    // 大屏默认使用侧边导航；用户显式开启悬浮底栏时继续保留原有底栏样式。
+    val isPortrait = configuration.screenHeightDp > configuration.screenWidthDp
+    // 折叠屏展开后即使竖屏也按大屏处理；普通平板竖屏仍走手机逻辑。
+    val isLargeScreen = configuration.screenWidthDp >= MIUIX_LARGE_SCREEN_MIN_WIDTH_DP &&
+        (!isPortrait || forceLargeScreen)
     val useNavigationRail = isLargeScreen && !useFloatingNavBar
     val isIosLikeFloatingBar = floatingNavBarStyle == MiuixFloatingNavigationBarStyle.IosLike
     val effectiveNavAlignment = if (isIosLikeFloatingBar && !isLargeScreen) {
@@ -584,8 +1053,6 @@ private fun MiuixMainContent(
     } else {
         currentNavAlignment
     }
-    val navAdaptiveActive = isLargeScreen && largeScreenNavAdaptiveEnabled && useFloatingNavBar
-
     // 规则页长按菜单状态
     var rulesMenuPosition by remember { mutableStateOf(androidx.compose.ui.geometry.Offset.Zero) }
     var rulesMenuShow by remember { mutableStateOf(false) }
@@ -724,9 +1191,6 @@ private fun MiuixMainContent(
 
     // 模糊效果
     val backdrop = com.Badnng.moe.ui.miuix.rememberMiuixBackdrop()
-    // 独立采样完整主页（包含底栏与 NavigationRail），供所有主页模态层使用。
-    // 必须与底栏自身使用的 backdrop 分开，避免 layerBackdrop / textureBlur 递归。
-    val homeOverlayBackdrop = com.Badnng.moe.ui.miuix.rememberMiuixBackdrop()
     val blurEnabled = backdrop != null
     val animatedMenuAlpha by androidx.compose.animation.core.animateFloatAsState(
         targetValue = if (rulesMenuShow) 1f else 0f,
@@ -734,7 +1198,11 @@ private fun MiuixMainContent(
         label = "rulesMenuScrimAlpha",
     )
     val sheetProgress = com.Badnng.moe.ui.component.BlurState.progress.floatValue
+    // 卡片一镜到底复用同一层背景采样：铺开过程中露出的背景与 BottomSheet 一致。
+    // 但遮罩本身只由 BottomSheet / 长按菜单驱动，转场自己画的那份不能再叠一层。
     val homeOverlayProgress = maxOf(sheetProgress, animatedMenuAlpha)
+    // BottomSheet / 长按菜单已经占用了同一块模糊遮罩，此时不发起卡片转场，避免双重模糊。
+    cardMorph.enabled = homeOverlayProgress <= 0.01f
     // NavigationRailState 由主页外层持有，窗口尺寸变化时仍使用同一个展开状态源。
     val navigationRailAvailable = useNavigationRail &&
         !isEditMode &&
@@ -822,6 +1290,10 @@ private fun MiuixMainContent(
                 rootWidthPx = coordinates.size.width
             }
     ) {
+        // 一镜到底转场需要一张「只含主页内容」的背景快照：转场叠加层与底栏都不能被录进去，
+        // 否则叠加层自己的 RenderEffect 会引用包含它自身的层，hwui 遍历 RenderNode 时成环爆栈。
+        // 卡片转场用独立的 cardMorphBackdrop，录制常驻挂在内层内容 Box 上；
+        // 这里这层只服务 BottomSheet / 长按菜单（整层采样，含底栏与侧栏）。
         Row(
             modifier = Modifier
                 .fillMaxSize()
@@ -845,65 +1317,24 @@ private fun MiuixMainContent(
         Box(
             modifier = Modifier
                 .weight(1f)
-                .fillMaxHeight(),
+                .fillMaxHeight()
+                .then(
+                    // 一镜到底的背景采样常驻挂载，保证转场第一帧就有可采样内容；
+                    // LocalCardMorphSource 为 null（三段式大屏）时不挂，行为与之前一致。
+                    if (cardMorphBackdrop != null && LocalCardMorphSource.current != null) {
+                        Modifier.layerBackdrop(cardMorphBackdrop)
+                    } else {
+                        Modifier
+                    },
+                ),
         ) {
         // Scaffold 内容层（layerBackdrop 只应用到内容，不包含底栏）
         Scaffold(
             modifier = Modifier.fillMaxSize(),
         ) { _ ->
-            Box(modifier = (if (backdrop != null) Modifier.fillMaxSize().layerBackdrop(backdrop) else Modifier.fillMaxSize())
-                .pointerInput(navAdaptiveActive, pagerState.currentPage) {
-                    if (!navAdaptiveActive) return@pointerInput
-                    var downX = 0f
-                    var downY = 0f
-                    var downZone = "center"
-                    var gestureDirection = 0
-                    var directionLocked = false
-                    val directionThresholdPx = 14f
-                    val axisRatio = 1.2f
-                    awaitPointerEventScope {
-                        while (true) {
-                            val event = awaitPointerEvent(PointerEventPass.Initial)
-                            if (pagerState.currentPage != 0) {
-                                gestureDirection = 0; directionLocked = false; continue
-                            }
-                            val change = event.changes.firstOrNull() ?: continue
-                            val x = change.position.x
-                            val y = change.position.y
-                            val width = size.width.toFloat().coerceAtLeast(1f)
-                            val zoneAtX = when {
-                                x < width / 3f -> "left"
-                                x > width * 2f / 3f -> "right"
-                                else -> "center"
-                            }
-                            if (change.pressed && !change.previousPressed) {
-                                gestureDirection = 0; directionLocked = false
-                                downX = x; downY = y; downZone = zoneAtX
-                            }
-                            if (change.pressed && !directionLocked) {
-                                val dx = x - downX; val dy = y - downY
-                                val absDx = kotlin.math.abs(dx); val absDy = kotlin.math.abs(dy)
-                                if (absDx >= directionThresholdPx || absDy >= directionThresholdPx) {
-                                    val verticalDominant = absDy > absDx * axisRatio
-                                    val horizontalDominant = absDx > absDy * axisRatio
-                                    if (!verticalDominant && !horizontalDominant) continue
-                                    gestureDirection = if (verticalDominant) 1 else -1
-                                    directionLocked = true
-                                    if (gestureDirection == 1 && navAdaptiveActive) {
-                                        if (currentNavAlignment != downZone) {
-                                            currentNavAlignment = downZone
-                                            prefs.edit().putString("nav_alignment", downZone).apply()
-                                        }
-                                    }
-                                }
-                            }
-                            if (!change.pressed && change.previousPressed || event.changes.none { it.pressed }) {
-                                gestureDirection = 0; directionLocked = false
-                            }
-                        }
-                    }
-                }
-            ) {
+            Box(modifier = if (backdrop != null) Modifier.fillMaxSize().layerBackdrop(backdrop) else Modifier.fillMaxSize()) {
+                // 列表那一份：组卡片从这里拿到自己的展开态。
+                CompositionLocalProvider(LocalCardMorphExpandedGroups provides expandedGroupIds.value) {
                 HorizontalPager(
                     state = pagerState,
                     modifier = Modifier
@@ -924,11 +1355,17 @@ private fun MiuixMainContent(
                                 useFloatingNavBar = useFloatingNavBar,
                                 onQrDialogVisibilityChange = { isQrDialogVisible = it },
                                 onNavigateToOrderDetail = onNavigateToOrderDetail,
-                                onNavigateToGroupDetail = onNavigateToGroupDetail
+                                onNavigateToGroupDetail = onNavigateToGroupDetail,
+                                // 「添加 + 身份码」悬浮工具栏贴在底部，转场时和底栏一起淡出。
+                                bottomFade = cardMorph::homeBottomAlpha,
+                                // 组卡片展开态：列表与叠加层共用一份（见 LocalCardMorphExpandedGroups）。
+                                expandedGroupIds = expandedGroupIds.value,
+                                onExpandedGroupsChange = { expandedGroupIds.value = it },
                             )
                             1 -> MiuixRulesScreen(
                                 bottomLayoutInfo = bottomLayoutInfo,
                                 onExpandNavigationRail = onExpandNavigationRail,
+                                onNavigateToSubPage = onNavigateToRuleSubPage,
                                 onShowMenu = { position, rename, delete, export ->
                                     rulesMenuPosition = position
                                     rulesMenuRename = rename
@@ -963,6 +1400,7 @@ private fun MiuixMainContent(
                         }
                     }
                 }
+                } // ← 新增：闭合 A2 的 LocalCardMorphExpandedGroups
             } // Box layerBackdrop
         }
 
@@ -978,7 +1416,12 @@ private fun MiuixMainContent(
                 !useNavigationRail &&
                 !useFloatingNavBar,
             hideImmediately = isQrDialogVisible,
-            modifier = Modifier.align(Alignment.BottomCenter)
+            // 卡片一镜到底铺开时容器底边会扫过底栏，把图标拦腰切一半留在容器外（看着像被裁掉），
+            // 所以底栏随转场进度先淡出；退出时整个收回动画期间保持隐藏，动画走完才淡回来
+            // （时序由 homeBottomAlpha 内部保证，这里只读绘制期系数，不参与重组）。
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .graphicsLayer { alpha = cardMorph.homeBottomAlpha() },
         ) {
             val barColor = if (blurEnabled) Color.Transparent else MiuixTheme.colorScheme.surface
             Box(
@@ -1041,6 +1484,9 @@ private fun MiuixMainContent(
                 useFloatingNavBar &&
                 !isFolded,
             hideImmediately = isQrDialogVisible,
+            // 同上（悬浮 / iOS 两种样式共用这一处）：一镜到底铺开时先淡出，避免被容器底边切一半，
+            // 退出时等收回动画走完再淡回来。
+            modifier = Modifier.graphicsLayer { alpha = cardMorph.homeBottomAlpha() },
         ) {
             if (isIosLikeFloatingBar) {
                 val navigationItems = remember {
@@ -1160,13 +1606,15 @@ private fun MiuixMainContent(
         }
 
         // 添加记录底部弹窗
-        val addOrderViewModel: OrderViewModel = viewModel()
+        val addOrderViewModel: OrderViewModel = viewModel(factory = orderViewModelFactory)
         com.Badnng.moe.ui.component.AddOrderBottomSheet(
             show = showBottomSheet,
             viewModel = addOrderViewModel,
             onDismiss = { showBottomSheet = false }
         )
+
         } // 内容 Box
+
         } // Row
 
         // 窄大屏窗口使用叠加式 NavigationRail，避免展开/收起时改变 Pager 的可用宽度。
@@ -1310,7 +1758,6 @@ private fun MiuixMainContent(
 
 private const val MIUIX_LARGE_SCREEN_MIN_WIDTH_DP = 700
 private const val MIUIX_FIXED_NAVIGATION_RAIL_MIN_WIDTH_DP = 900
-private const val MIUIX_PANE_ROLE_METADATA = "miuix_home_pane_role"
 
 private suspend fun animateMiuixPagerToPage(
     pagerState: androidx.compose.foundation.pager.PagerState,
@@ -1348,160 +1795,6 @@ private data class MiuixBottomBarMeasurement(
     val rootBottomInRootPx: Int,
     val rootWidthPx: Int,
 )
-
-private enum class MiuixHomePaneRole {
-    Main,
-    Detail,
-}
-
-private data class MiuixSupportingPaneSceneKey(
-    val mainContentKey: Any,
-)
-
-private data class MiuixDetailPaneTarget(
-    val entry: NavEntry<NavKey>,
-    val depth: Int,
-)
-
-/**
- * Miuix 大屏主内容/二级页场景。左侧 NavigationRail 仍由主入口负责，这里只把
- * 主入口和最后一个二级入口排列为中、右两栏。
- */
-@OptIn(ExperimentalMaterial3ExpressiveApi::class)
-private class MiuixSupportingPaneScene(
-    private val mainEntry: NavEntry<NavKey>,
-    private val detailEntry: NavEntry<NavKey>?,
-    private val detailDepth: Int,
-    override val previousEntries: List<NavEntry<NavKey>>,
-) : Scene<NavKey> {
-    override val key: Any = MiuixSupportingPaneSceneKey(
-        mainContentKey = mainEntry.contentKey,
-    )
-    override val entries: List<NavEntry<NavKey>> = listOfNotNull(mainEntry, detailEntry)
-    override val content: @Composable () -> Unit = {
-        BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
-            val motionScheme = MaterialTheme.motionScheme
-            // 与 Miuix NavigationRail 内部 RailExpandSpring 完全相同的阻尼和响应参数。
-            val navigationRailPaneSpatialSpec = remember {
-                folmeSpring(
-                    damping = 1f,
-                    response = 0.35f,
-                    visibilityThreshold = IntSize(1, 1),
-                )
-            }
-            // 右侧详情略宽于中间列表，同时给设置列表保留更舒展的可用宽度。
-            val detailPaneWidth = (maxWidth * 0.42f).coerceIn(360.dp, 600.dp)
-            val currentDetailTarget = detailEntry?.let {
-                MiuixDetailPaneTarget(entry = it, depth = detailDepth)
-            }
-            var retainedDetailTarget by remember { mutableStateOf(currentDetailTarget) }
-            if (currentDetailTarget != null) {
-                SideEffect { retainedDetailTarget = currentDetailTarget }
-            }
-            val renderedDetailTarget = currentDetailTarget ?: retainedDetailTarget
-            Row(modifier = Modifier.fillMaxSize()) {
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxHeight(),
-                ) {
-                    mainEntry.Content()
-                }
-                AnimatedVisibility(
-                    visible = currentDetailTarget != null,
-                    enter = expandHorizontally(
-                        animationSpec = navigationRailPaneSpatialSpec,
-                        expandFrom = Alignment.End,
-                    ),
-                    exit = shrinkHorizontally(
-                        animationSpec = navigationRailPaneSpatialSpec,
-                        shrinkTowards = Alignment.End,
-                    ),
-                ) {
-                    Row(modifier = Modifier.fillMaxHeight()) {
-                        Spacer(
-                            modifier = Modifier
-                                .width(1.dp)
-                                .fillMaxHeight()
-                                .background(MiuixTheme.colorScheme.outline.copy(alpha = 0.35f)),
-                        )
-                        Box(
-                            modifier = Modifier
-                                .width(detailPaneWidth)
-                                .fillMaxHeight()
-                                .background(MiuixTheme.colorScheme.surface),
-                        ) {
-                            renderedDetailTarget?.let { target ->
-                                AnimatedContent(
-                                    targetState = target,
-                                    contentKey = { it.entry.contentKey },
-                                    transitionSpec = {
-                                        val spatialSpec = motionScheme.defaultSpatialSpec<IntOffset>()
-                                        val effectsSpec = motionScheme.defaultEffectsSpec<Float>()
-                                        when {
-                                            targetState.depth > initialState.depth -> {
-                                                (slideInHorizontally(
-                                                    animationSpec = spatialSpec,
-                                                    initialOffsetX = { it },
-                                                ) + fadeIn(animationSpec = effectsSpec)) togetherWith
-                                                    (slideOutHorizontally(
-                                                        animationSpec = spatialSpec,
-                                                        targetOffsetX = { -it / 4 },
-                                                    ) + fadeOut(animationSpec = effectsSpec))
-                                            }
-                                            targetState.depth < initialState.depth -> {
-                                                (slideInHorizontally(
-                                                    animationSpec = spatialSpec,
-                                                    initialOffsetX = { -it / 4 },
-                                                ) + fadeIn(animationSpec = effectsSpec)) togetherWith
-                                                    (slideOutHorizontally(
-                                                        animationSpec = spatialSpec,
-                                                        targetOffsetX = { it },
-                                                    ) + fadeOut(animationSpec = effectsSpec))
-                                            }
-                                            else -> {
-                                                fadeIn(animationSpec = effectsSpec) togetherWith
-                                                    fadeOut(animationSpec = effectsSpec)
-                                            }
-                                        }
-                                    },
-                                    label = "miuixThirdPaneNavigation",
-                                ) { detailTarget ->
-                                    detailTarget.entry.Content()
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-private class MiuixSupportingPaneSceneStrategy(
-    private val enabled: Boolean,
-) : SceneStrategy<NavKey> {
-    override fun SceneStrategyScope<NavKey>.calculateScene(
-        entries: List<NavEntry<NavKey>>,
-    ): Scene<NavKey>? {
-        if (!enabled || entries.isEmpty()) return null
-        val mainEntry = entries.firstOrNull {
-            it.metadata[MIUIX_PANE_ROLE_METADATA] == MiuixHomePaneRole.Main
-        } ?: return null
-        val detailEntry = entries.lastOrNull {
-            it.metadata[MIUIX_PANE_ROLE_METADATA] == MiuixHomePaneRole.Detail
-        }
-        val detailDepth = entries.indexOfLast {
-            it.metadata[MIUIX_PANE_ROLE_METADATA] == MiuixHomePaneRole.Detail
-        }.coerceAtLeast(0)
-        return MiuixSupportingPaneScene(
-            mainEntry = mainEntry,
-            detailEntry = detailEntry,
-            detailDepth = detailDepth,
-            previousEntries = if (detailEntry != null) entries.dropLast(1) else emptyList(),
-        )
-    }
-}
 
 @Composable
 private fun MiuixHomeNavigationRail(
@@ -1591,6 +1884,7 @@ private fun MiuixSettingsSubPageDirect(
         SettingsPage.Recognition -> "识别方式"
         SettingsPage.CustomPrompt -> "自定义 Prompt"
         SettingsPage.KeepAlive -> "保活设置"
+        SettingsPage.WearableSync -> "手表同步"
         SettingsPage.Storage -> "清理空间"
         SettingsPage.About -> "关于"
         SettingsPage.Backup -> "备份与恢复"
@@ -1717,6 +2011,7 @@ private fun MiuixSettingsSubPageDirect(
                                 )
                                 SettingsPage.Credits -> com.Badnng.moe.ui.screen.settings.CreditsSettingsContent(performHaptic, topBarHeight, scrollState)
                                 SettingsPage.Developer -> com.Badnng.moe.ui.screen.settings.DeveloperSettingsContent(performHaptic, topBarHeight, scrollState)
+                                SettingsPage.WearableSync -> com.Badnng.moe.ui.screen.settings.WearableSyncSettingsContent(performHaptic, topBarHeight, scrollState)
                                 SettingsPage.Main -> {}
                                 else -> {}
                             }

@@ -125,20 +125,8 @@ fun Md3eBlockedWordsEditor(
     }
 
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text(
-            text = "包含以下词语的短信或通知将直接忽略，不会上传或执行离线识别。",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
         BlockedWordsEmptyOrFlow(
             words = state.words,
-            emptyText = {
-                Text(
-                    text = "暂无屏蔽词",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            },
             item = { word ->
                 InputChip(
                     selected = false,
@@ -165,33 +153,41 @@ fun Md3eBlockedWordsEditor(
                 )
             },
         )
-        OutlinedTextField(
-            value = state.input,
-            onValueChange = { state.input = it.replace("\n", "") },
-            modifier = Modifier
-                .fillMaxWidth()
-                .onPreviewKeyEvent { event ->
-                    if (event.type == KeyEventType.KeyUp && event.key == Key.Enter) {
-                        addWord()
-                        true
-                    } else {
-                        false
+        Column {
+            OutlinedTextField(
+                value = state.input,
+                onValueChange = { state.input = it.replace("\n", "") },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .onPreviewKeyEvent { event ->
+                        if (event.type == KeyEventType.KeyUp && event.key == Key.Enter) {
+                            addWord()
+                            true
+                        } else {
+                            false
+                        }
+                    },
+                label = { Text("添加屏蔽词") },
+                supportingText = {
+                    Text("${state.words.size}/${RecognitionBlockedWordsPolicy.MAX_WORDS}")
+                },
+                trailingIcon = {
+                    IconButton(onClick = addWord) {
+                        Icon(Icons.Default.Md3eAdd, contentDescription = "添加屏蔽词")
                     }
                 },
-            label = { Text("添加屏蔽词") },
-            supportingText = {
-                Text("${state.words.size}/${RecognitionBlockedWordsPolicy.MAX_WORDS}")
-            },
-            trailingIcon = {
-                IconButton(onClick = addWord) {
-                    Icon(Icons.Default.Md3eAdd, contentDescription = "添加屏蔽词")
-                }
-            },
-            singleLine = true,
-            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-            keyboardActions = KeyboardActions(onDone = { addWord() }),
-            shape = RoundedCornerShape(15.dp),
-        )
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                keyboardActions = KeyboardActions(onDone = { addWord() }),
+                shape = RoundedCornerShape(15.dp),
+            )
+            Text(
+                text = "包含以下词语的短信或通知将直接忽略，不会上传或执行离线识别。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            )
+        }
     }
 }
 
@@ -207,20 +203,8 @@ fun MiuixBlockedWordsEditor(
     }
 
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        MiuixText(
-            text = "包含以下词语的短信或通知将直接忽略，不会上传或执行离线识别。",
-            style = MiuixTheme.textStyles.body2,
-            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-        )
         BlockedWordsEmptyOrFlow(
             words = state.words,
-            emptyText = {
-                MiuixText(
-                    text = "暂无屏蔽词",
-                    style = MiuixTheme.textStyles.body2,
-                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-                )
-            },
             item = { word ->
                 MiuixBlockedWordChip(
                     word = word,
@@ -231,41 +215,46 @@ fun MiuixBlockedWordsEditor(
                 )
             },
         )
-        MiuixTextField(
-            value = state.input,
-            onValueChange = { state.input = it.replace("\n", "") },
-            label = "添加屏蔽词（${state.words.size}/${RecognitionBlockedWordsPolicy.MAX_WORDS}）",
-            modifier = Modifier
-                .fillMaxWidth()
-                .onPreviewKeyEvent { event ->
-                    if (event.type == KeyEventType.KeyUp && event.key == Key.Enter) {
-                        addWord()
-                        true
-                    } else {
-                        false
+        Column {
+            MiuixTextField(
+                value = state.input,
+                onValueChange = { state.input = it.replace("\n", "") },
+                label = "添加屏蔽词（${state.words.size}/${RecognitionBlockedWordsPolicy.MAX_WORDS}）",
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .onPreviewKeyEvent { event ->
+                        if (event.type == KeyEventType.KeyUp && event.key == Key.Enter) {
+                            addWord()
+                            true
+                        } else {
+                            false
+                        }
+                    },
+                trailingIcon = {
+                    MiuixIconButton(onClick = addWord) {
+                        MiuixIcon(MiuixIcons.Regular.Add, contentDescription = "添加屏蔽词")
                     }
                 },
-            trailingIcon = {
-                MiuixIconButton(onClick = addWord) {
-                    MiuixIcon(MiuixIcons.Regular.Add, contentDescription = "添加屏蔽词")
-                }
-            },
-            singleLine = true,
-            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-            keyboardActions = KeyboardActions(onDone = { addWord() }),
-        )
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                keyboardActions = KeyboardActions(onDone = { addWord() }),
+            )
+            MiuixText(
+                text = "包含以下词语的短信或通知将直接忽略，不会上传或执行离线识别。",
+                style = MiuixTheme.textStyles.body2,
+                color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            )
+        }
     }
 }
 
 @Composable
 private fun BlockedWordsEmptyOrFlow(
     words: List<String>,
-    emptyText: @Composable () -> Unit,
     item: @Composable (String) -> Unit,
 ) {
-    if (words.isEmpty()) {
-        emptyText()
-    } else {
+    if (words.isNotEmpty()) {
         FlowRow(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp),

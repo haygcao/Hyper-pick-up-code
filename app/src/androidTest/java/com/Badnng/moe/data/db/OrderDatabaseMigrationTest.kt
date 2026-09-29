@@ -6,6 +6,8 @@ import androidx.sqlite.db.framework.FrameworkSQLiteOpenHelperFactory
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.After
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -125,6 +127,62 @@ class OrderDatabaseMigrationTest {
             }
         }
         assertTrue(columns.contains("ocrDiagnosticData"))
+    }
+
+    @Test
+    fun migrationNineToTenDropsRuleCorrectionFlagAndDrafts() {
+        val database = openHelper.writableDatabase
+
+        OrderDatabase.MIGRATION_6_7.migrate(database)
+        OrderDatabase.MIGRATION_7_8.migrate(database)
+        OrderDatabase.MIGRATION_8_9.migrate(database)
+        // v9 里草稿与正常订单同表，仅靠 needsRuleCorrection=1 区分。
+        database.execSQL(
+            "INSERT INTO orders (id, takeoutCode, screenshotPath, recognizedText, isCompleted, createdAt, orderType, needsRuleCorrection) " +
+                "VALUES ('draft-1', '', '', '待纠正', 0, 1, '餐食', 1)"
+        )
+        database.execSQL(
+            "INSERT INTO orders (id, takeoutCode, screenshotPath, recognizedText, isCompleted, createdAt, orderType, needsRuleCorrection) " +
+                "VALUES ('order-1', 'A123', '', '正常', 0, 2, '餐食', 0)"
+        )
+
+        OrderDatabase.MIGRATION_9_10.migrate(database)
+
+        val columns = database.query("PRAGMA table_info(`orders`)").use { cursor ->
+            val nameIndex = cursor.getColumnIndexOrThrow("name")
+            buildSet {
+                while (cursor.moveToNext()) add(cursor.getString(nameIndex))
+            }
+        }
+        assertFalse(columns.contains("needsRuleCorrection"))
+
+        val remainingIds = database.query("SELECT id FROM orders").use { cursor ->
+            val idIndex = cursor.getColumnIndexOrThrow("id")
+            buildList {
+                while (cursor.moveToNext()) add(cursor.getString(idIndex))
+            }
+        }
+        // 草稿必须随迁移清掉，否则主页会出现空码订单；正常订单保留。
+        assertEquals(listOf("order-1"), remainingIds)
+    }
+
+    @Test
+    fun migrationTenToElevenAddsGroupScreenshotListWithoutLosingLegacyPath() {
+        val database = openHelper.writableDatabase
+        database.execSQL(
+            "INSERT INTO order_groups " +
+                "(id, name, orderType, screenshotPath, recognizedText, orderCount, isCompleted, createdAt) " +
+                "VALUES (1, '测试组', '快递', 'old-image.jpg', '', 1, 0, 1)"
+        )
+
+        OrderDatabase.MIGRATION_10_11.migrate(database)
+        OrderDatabase.MIGRATION_10_11.migrate(database)
+
+        database.query("SELECT screenshotPath, screenshotPathsJson FROM order_groups WHERE id = 1").use { cursor ->
+            assertTrue(cursor.moveToFirst())
+            assertEquals("old-image.jpg", cursor.getString(0))
+            assertEquals("[]", cursor.getString(1))
+        }
     }
 
     private companion object {

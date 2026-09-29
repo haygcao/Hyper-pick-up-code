@@ -9,33 +9,84 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.IBinder
+import android.util.Log
 import android.widget.RemoteViews
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import com.Badnng.moe.R
 import com.Badnng.moe.activity.MainActivity
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 
 class KeepAliveService : Service() {
 
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
     override fun onCreate() {
         super.onCreate()
+        Log.d(TAG, "KeepAliveService onCreate")
+        // 尽早提升为前台服务，避免 startForegroundService() 的 5 秒超时。
+        // 部分新平台也可能要求 onStartCommand 中再次调用，因此 onStartCommand 也会调用一次。
         startForeground(NOTIFICATION_ID, buildNotification())
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // startForegroundService() 启动后必须尽快调用 startForeground()。
+        // 在 onStartCommand 开头再次调用，兼容 Android 15+ 对前台服务启动时机的严格要求。
+        startForeground(NOTIFICATION_ID, buildNotification())
+        isForegroundStarted = true
+        // 如果启动过程中消费者已被关闭（例如用户刚好关闭手表同步/后台通知），
+        // 这里已经调用过 startForeground()，可以安全地立即停止，避免无消费者常驻。
+        if (!hasConsumer(applicationContext)) {
+            Log.d(TAG, "KeepAliveService 启动后无消费者，安全停止")
+            stopSelf()
+            return START_NOT_STICKY
+        }
+        // 进程被系统拉起后自动恢复穿戴通道（注册消息监听，保证后台能收到手表心跳 ping 并回 pong）。
+        // XMS 初始化与类加载不能在服务主线程触碰（会与 SDK 回调线程的初始化锁竞争，
+        // 实测冷启动时主线程被阻塞约 3.3s，期间 UI 无法交互）；全部交给后台协程。
+        serviceScope.launch {
+            Log.d(
+                TAG,
+                "KeepAliveService onStartCommand: wearableEnabled=" +
+                    com.Badnng.moe.wearable.WearableSyncManager
+                        .getInstance(applicationContext).enabled.value,
+            )
+            // XMS 初始化、节点发现和 Binder 查询不能占用服务主线程，否则从后台进入主页
+            // 时首帧虽然已经显示，触摸事件仍会被延迟处理。
+            runCatching {
+                com.Badnng.moe.wearable.WearableSyncManager
+                    .getInstance(applicationContext)
+                    .ensureWearChannel()
+            }
+        }
         return START_STICKY
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onTaskRemoved(rootIntent: Intent?) {
-        // 任务被清除后重新拉起
+        // 任务被清除后用前台服务方式重新拉起；普通 startService 在 Android 8+
+        // 的后台场景可能被系统拒绝，导致手表监听无法恢复。
+        if (!hasConsumer(applicationContext)) return
         val restartIntent = Intent(applicationContext, KeepAliveService::class.java)
-        startService(restartIntent)
+        runCatching {
+            ContextCompat.startForegroundService(applicationContext, restartIntent)
+        }.onFailure { error ->
+            Log.w(TAG, "任务移除后重启保活服务失败: ${error.message}", error)
+        }
         super.onTaskRemoved(rootIntent)
     }
 
     override fun onDestroy() {
-        // 系统杀死时不调用 stopForeground，让系统保留通知避免频繁重建
+        // 这里只结束保活通知服务。穿戴 MessageApi listener 属于
+        // WearableSyncManager 生命周期，不能因 MainActivity.onResume 隐藏通知而注销。
+        Log.d(TAG, "KeepAliveService onDestroy")
+        isForegroundStarted = false
+        serviceScope.cancel()
         super.onDestroy()
     }
 
@@ -66,14 +117,41 @@ class KeepAliveService : Service() {
     }
 
     companion object {
+        private const val TAG = "WearableSyncService"
         private const val NOTIFICATION_ID = 9999
         private const val CHANNEL_ID = "keep_alive"
 
+        /** 服务是否已经完成 startForeground()，用于避免在启动竞争窗口内提前 stopService。 */
+        @Volatile
+        private var isForegroundStarted = false
+
+        /** 是否存在需要保活服务的消费者：后台通知开启，或手表同步开启。 */
+        fun hasConsumer(context: Context): Boolean {
+            val appContext = context.applicationContext
+            val persistentNotification = appContext
+                .getSharedPreferences("settings", Context.MODE_PRIVATE)
+                .getBoolean("persistent_notification_enabled", true)
+            val wearableEnabled = appContext
+                .getSharedPreferences("wearable_sync", Context.MODE_PRIVATE)
+                .getBoolean("wearable_sync_enabled", false)
+            return persistentNotification || wearableEnabled
+        }
+
         fun start(context: Context) {
-            context.startService(Intent(context, KeepAliveService::class.java))
+            if (!hasConsumer(context)) return
+            val intent = Intent(context, KeepAliveService::class.java)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                ContextCompat.startForegroundService(context, intent)
+            } else {
+                context.startService(intent)
+            }
         }
 
         fun stop(context: Context) {
+            // 如果服务还没有完成 startForeground()，此时 stopService 会触发
+            // ForegroundServiceDidNotStartInTimeException；跳过这次停止，等服务就绪后再由
+            // 下一次 onResume/stopIfNoConsumer 处理。
+            if (!isForegroundStarted) return
             context.stopService(Intent(context, KeepAliveService::class.java))
         }
 
@@ -82,7 +160,31 @@ class KeepAliveService : Service() {
         }
 
         fun hideNotification(context: Context) {
+            // 手表同步开启时，KeepAliveService 同时承担穿戴监听保活。
+            // MainActivity.onResume() 隐藏普通后台通知不能把穿戴监听一起停掉。
+            // 直接读偏好，避免在主线程构造 WearableSyncManager（XMS 类加载/初始化
+            // 会与 SDK 回调线程的初始化锁竞争，冷启动时主线程曾被实测阻塞约 3.3s）。
+            val wearableEnabled = context.applicationContext
+                .getSharedPreferences("wearable_sync", Context.MODE_PRIVATE)
+                .getBoolean("wearable_sync_enabled", false)
+            if (wearableEnabled) {
+                return
+            }
             stop(context)
+        }
+
+        /** 手表同步关闭后，在没有其他后台通知消费者时停止服务。 */
+        fun stopIfNoConsumer(context: Context) {
+            val appContext = context.applicationContext
+            val persistentNotification = appContext
+                .getSharedPreferences("settings", Context.MODE_PRIVATE)
+                .getBoolean("persistent_notification_enabled", true)
+            val wearableEnabled = appContext
+                .getSharedPreferences("wearable_sync", Context.MODE_PRIVATE)
+                .getBoolean("wearable_sync_enabled", false)
+            if (!persistentNotification && !wearableEnabled) {
+                stop(appContext)
+            }
         }
     }
 }

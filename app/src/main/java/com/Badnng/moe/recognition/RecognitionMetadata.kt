@@ -52,6 +52,9 @@ data class RecognitionExecutionMetadata(
     val ocrDiagnosticData: String? = null,
 )
 
+private fun normalizePickupLocation(value: String?): String? = value
+    ?.trim()
+    ?.takeIf { it.isNotBlank() && it.any(Char::isLetterOrDigit) }
 object RecognizedOrderFactory {
     fun fromRecognition(
         result: RecognitionResult,
@@ -102,7 +105,7 @@ object RecognizedOrderFactory {
             sourceApp = sourceApp,
             sourcePackage = sourcePackage,
             fullText = fullText,
-            pickupLocation = pickupLocation,
+            pickupLocation = normalizePickupLocation(pickupLocation),
             groupId = groupId,
             recognitionMode = metadata.mode.key,
             recognitionInputType = metadata.inputType.key,
